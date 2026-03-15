@@ -237,11 +237,16 @@ export function SyncSettings() {
         <>
           <Divider />
           <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0.5 }}>
+            <Typography level="body-xs" sx={{ color: 'text.tertiary', fontWeight: 'lg' }}>
+              Category
+            </Typography>
+            <Typography level="body-xs" sx={{ color: 'text.tertiary', fontWeight: 'lg' }}>
+              Last synced
+            </Typography>
             {[
               ['Conversations', lastConversationSyncTime],
               ['Assets', lastBlobsSyncTime],
               ['Settings', lastStoresSyncTime],
-              ['Full sync', lastSyncAt],
             ].map(([label, ts]) => (
               <React.Fragment key={label as string}>
                 <Typography level="body-xs" sx={{ color: 'text.secondary' }}>
