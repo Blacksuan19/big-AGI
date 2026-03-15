@@ -3,6 +3,9 @@ import * as React from 'react';
 import { Avatar, Box, IconButton, ListItem, ListItemButton, ListItemDecorator, Sheet, styled, Tooltip, Typography } from '@mui/joy';
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import CloudDoneRoundedIcon from '@mui/icons-material/CloudDoneRounded';
+import CloudOffRoundedIcon from '@mui/icons-material/CloudOffRounded';
+import CloudUploadRoundedIcon from '@mui/icons-material/CloudUploadRounded';
 import CopyAllIcon from '@mui/icons-material/CopyAll';
 import DeleteForeverIcon from '@mui/icons-material/DeleteForever';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
@@ -71,6 +74,7 @@ export interface ChatNavigationItemData {
   beingGenerated: boolean;
   systemPurposeId: SystemPurposeId;
   searchFrequency: number;
+  syncState: 'synced' | 'pending' | 'syncing' | 'local-only' | null;
 }
 
 export interface FolderChangeRequest {
@@ -114,6 +118,7 @@ function ChatDrawerItem(props: {
     beingGenerated,
     systemPurposeId,
     searchFrequency,
+    syncState,
   } = props.item;
   const isNew = messageCount === 0;
 
@@ -209,6 +214,46 @@ function ChatDrawerItem(props: {
 
   const progress = props.bottomBarBasis ? 100 * (searchFrequency || messageCount) / props.bottomBarBasis : 0;
 
+  const syncIndicatorComponent = React.useMemo(() => {
+    if (!syncState)
+      return null;
+
+    if (syncState === 'local-only')
+      return (
+        <Tooltip arrow disableInteractive title='Local only: incognito chats are never synced'>
+          <Box sx={{ display: 'inline-flex', color: 'warning.softColor' }}>
+            <CloudOffRoundedIcon sx={{ fontSize: 'sm' }} />
+          </Box>
+        </Tooltip>
+      );
+
+    if (syncState === 'syncing')
+      return (
+        <Tooltip arrow disableInteractive title='Syncing this chat'>
+          <Box sx={{ display: 'inline-flex', color: 'primary.500' }}>
+            <CloudUploadRoundedIcon sx={{ fontSize: 'sm' }} />
+          </Box>
+        </Tooltip>
+      );
+
+    if (syncState === 'pending')
+      return (
+        <Tooltip arrow disableInteractive title='This chat has local changes waiting to sync'>
+          <Box sx={{ display: 'inline-flex', color: 'warning.500' }}>
+            <CloudUploadRoundedIcon sx={{ fontSize: 'sm' }} />
+          </Box>
+        </Tooltip>
+      );
+
+    return (
+      <Tooltip arrow disableInteractive title='Synced'>
+        <Box sx={{ display: 'inline-flex', color: 'success.500' }}>
+          <CloudDoneRoundedIcon sx={{ fontSize: 'sm' }} />
+        </Box>
+      </Tooltip>
+    );
+  }, [syncState]);
+
   const titleRowComponent = React.useMemo(() => <>
 
     {/* Symbol, if globally enabled */}
@@ -279,22 +324,27 @@ function ChatDrawerItem(props: {
     )}
 
     {/* Right text */}
-    {searchFrequency > 0 ? (
-      // Display search frequency if it exists and is greater than 0
-      <Typography level='body-sm'>
-        {searchFrequency}
-      </Typography>
-    ) : (props.showSymbols && (userFlagsSummary || containsDocAttachments || containsImageAssets)) ? (
-      <Box sx={{
-        fontSize: 'xs',
-        whiteSpace: 'nowrap',
-        pointerEvents: 'none',
-      }}>
-        {userFlagsSummary}{containsDocAttachments && '📄'}{containsImageAssets && '🖍️'}
+    {(searchFrequency > 0 || syncIndicatorComponent || (props.showSymbols && (userFlagsSummary || containsDocAttachments || containsImageAssets))) && (
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, whiteSpace: 'nowrap' }}>
+        {searchFrequency > 0 ? (
+          <Typography level='body-sm'>
+            {searchFrequency}
+          </Typography>
+        ) : null}
+        {props.showSymbols && (userFlagsSummary || containsDocAttachments || containsImageAssets) ? (
+          <Box sx={{
+            fontSize: 'xs',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+          }}>
+            {userFlagsSummary}{containsDocAttachments && '📄'}{containsImageAssets && '🖍️'}
+          </Box>
+        ) : null}
+        {syncIndicatorComponent}
       </Box>
-    ) : null}
+    )}
 
-  </>, [beingGenerated, containsDocAttachments, containsImageAssets, handleTitleEditBegin, handleTitleEditCancel, handleTitleEditChange, hasBeamOpen, isActive, isEditingTitle, isIncognito, isNew, personaImageURI, personaSymbol, props.showSymbols, searchFrequency, title, userFlagsSummary]);
+  </>, [beingGenerated, containsDocAttachments, containsImageAssets, handleTitleEditBegin, handleTitleEditCancel, handleTitleEditChange, hasBeamOpen, isActive, isEditingTitle, isIncognito, isNew, personaImageURI, personaSymbol, props.showSymbols, searchFrequency, syncIndicatorComponent, title, userFlagsSummary]);
 
   const progressBarFixedComponent = React.useMemo(() =>
     progress > 0 && (

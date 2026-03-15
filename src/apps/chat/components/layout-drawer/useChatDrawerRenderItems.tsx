@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 
 import { useModuleBeamStore } from '~/modules/beam/store-module-beam';
 
@@ -9,6 +10,7 @@ import { createTimeBucketClassifierEn } from '~/common/util/timeUtils';
 import { isAttachmentFragment, isContentOrAttachmentFragment, isDocPart, isImageRefPart, isZyncAssetImageReferencePart } from '~/common/stores/chat/chat.fragments';
 import { shallowEquals } from '~/common/util/hooks/useShallowObject';
 import { useChatStore } from '~/common/stores/chat/store-chats';
+import { useSyncStore } from '~/modules/sync/store-sync';
 
 import type { ChatNavigationItemData } from './ChatDrawerItem';
 
@@ -101,6 +103,19 @@ export function useChatDrawerRenderItems(
 
   // external state
   const openBeamConversationIds = useModuleBeamStore(state => state.openBeamConversationIds);
+  const {
+    syncUserId,
+    syncStatus,
+    lastConversationSyncTime,
+    pendingChangedConversationIds,
+    pendingDeletedConversationIds,
+  } = useSyncStore(useShallow((state) => ({
+    syncUserId: state.syncUserId,
+    syncStatus: state.syncStatus,
+    lastConversationSyncTime: state.lastConversationSyncTime,
+    pendingChangedConversationIds: state.pendingChangedConversationIds,
+    pendingDeletedConversationIds: state.pendingDeletedConversationIds,
+  })));
 
 
   // [effect] Refresh every minute because the `getTimeBucketEn` function uses the current time
@@ -108,6 +123,15 @@ export function useChatDrawerRenderItems(
     const interval = setInterval(() => setJustAMinuteCounter(c => c + 1), 60 * 1000);
     return () => clearInterval(interval);
   }, []);
+
+  const pendingChangedConversationIdsSet = React.useMemo(
+    () => new Set(pendingChangedConversationIds),
+    [pendingChangedConversationIds],
+  );
+  const pendingDeletedConversationIdsSet = React.useMemo(
+    () => new Set(pendingDeletedConversationIds),
+    [pendingDeletedConversationIds],
+  );
 
 
   const stabilizeRenderItems = React.useRef<ChatDrawerRenderItems>(undefined);
@@ -191,6 +215,15 @@ export function useChatDrawerRenderItems(
             beingGenerated: !!_c._abortController, // FIXME: when the AbortController is moved at the message level, derive the state in the conv
             systemPurposeId: _c.systemPurposeId,
             searchFrequency,
+            syncState: !syncUserId
+              ? null
+              : _c._isIncognito
+                ? 'local-only'
+                : (pendingDeletedConversationIdsSet.has(_c.id)
+                  || pendingChangedConversationIdsSet.has(_c.id)
+                  || ((_c.updated || _c.created || 0) > lastConversationSyncTime))
+                  ? (syncStatus === 'syncing' ? 'syncing' : 'pending')
+                  : 'synced',
           };
         })
         .filter(item => !!item) as ChatNavigationItemData[];
