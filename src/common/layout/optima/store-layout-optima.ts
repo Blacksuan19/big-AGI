@@ -8,7 +8,7 @@ import { navItems } from '~/common/app.nav';
 import { OPTIMA_OPEN_DEBOUNCE, OPTIMA_PEEK_HOVER_ENTER_DELAY, OPTIMA_PEEK_HOVER_ENTER_DELAY_PANEL, OPTIMA_PEEK_HOVER_TIMEOUT } from './optima.config';
 
 
-export type PreferencesTabId = 'chat' | 'voice' | 'draw' | 'tools' | undefined;
+export type PreferencesTabId = 'chat' | 'voice' | 'draw' | 'tools' | 'sync' | undefined;
 
 export type ModelOptionsContext = 'full' | 'parameters';
 

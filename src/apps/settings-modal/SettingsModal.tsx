@@ -8,11 +8,13 @@ import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded';
 import MicIcon from '@mui/icons-material/Mic';
 import ScienceIcon from '@mui/icons-material/Science';
 import SearchIcon from '@mui/icons-material/Search';
+import SyncRoundedIcon from '@mui/icons-material/SyncRounded';
 import TerminalOutlinedIcon from '@mui/icons-material/TerminalOutlined';
 
 import { BrowseSettings } from '~/modules/browse/BrowseSettings';
 import { DallESettings } from '~/modules/t2i/dalle/DallESettings';
 import { GoogleSearchSettings } from '~/modules/google/GoogleSearchSettings';
+import { SyncSettings } from '~/modules/sync/SyncSettings';
 import { T2ISettings } from '~/modules/t2i/T2ISettings';
 
 import type { PreferencesTabId } from '~/common/layout/optima/store-layout-optima';
@@ -250,6 +252,7 @@ export function SettingsModal(props: {
           <Tab value='voice' disableIndicator sx={_styles.tabsListTab}>Voice</Tab>
           <Tab value='draw' disableIndicator sx={_styles.tabsListTab}>Draw</Tab>
           <Tab value='tools' disableIndicator sx={_styles.tabsListTab}>Tools</Tab>
+          <Tab value='sync' disableIndicator sx={_styles.tabsListTab}>Sync</Tab>
         </TabList>
 
         <TabPanel value='chat' color='primary' variant='outlined' sx={_styles.tabPanel}>
@@ -338,6 +341,14 @@ export function SettingsModal(props: {
               <GoogleSearchSettings />
             </Topic>
             {/*<Topic icon='🛠' title='Other tools...' />*/}
+          </Topics>
+        </TabPanel>
+
+        <TabPanel value='sync' variant='outlined' sx={_styles.tabPanel}>
+          <Topics>
+            <Topic icon={<SyncRoundedIcon />} title='Cross-Device Sync'>
+              <SyncSettings />
+            </Topic>
           </Topics>
         </TabPanel>
       </Tabs>

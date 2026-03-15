@@ -124,6 +124,22 @@ export async function deleteDBAsset(id: DBlobAssetId) {
 //   }).delete() : 0;
 // }
 
+/**
+ * Returns all assets whose updatedAt is strictly after the given date.
+ * Used by the sync engine to find locally-changed assets to push.
+ */
+export async function getDBAssetsUpdatedAfter(since: Date): Promise<DBlobDBAsset[]> {
+  return assetsTable.where('updatedAt').above(since).toArray() as Promise<DBlobDBAsset[]>;
+}
+
+/**
+ * Insert-or-replace an asset (upsert by primary key).
+ * Used by the sync engine when pulling remote assets into the local Dexie DB.
+ */
+export async function putDBAsset(asset: DBlobDBAsset): Promise<DBlobAssetId> {
+  return assetsTable.put(asset);
+}
+
 export async function gcDBAssetsByScope(contextId: DBlobDBContextId, scopeId: DBlobDBScopeId, assetType: DBlobAssetType | null, keepIds: DBlobAssetId[]) {
   // get all the DB keys
   const dbAssetIds = await assetsTable.where((assetType !== null) ? {
