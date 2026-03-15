@@ -12,9 +12,8 @@ name: Create and publish Docker images
 on:
   push:
     branches:
-      - main          # Primary branch (Big-AGI Open)
-    tags:
-      - 'v2.*'        # Stable releases (v2.0.0, v2.1.0, etc.)
+      - main-sync     # Long-lived sync branch
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -87,7 +86,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}
           build-args: |
-            NEXT_PUBLIC_GA4_MEASUREMENT_ID=${{ secrets.GA4_MEASUREMENT_ID }}
             NEXT_PUBLIC_BUILD_HASH=${{ github.sha }}
             NEXT_PUBLIC_BUILD_REF_NAME=${{ github.ref_name }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
@@ -147,18 +145,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Development: main branch
-            type=raw,value=development,enable=${{ github.ref == 'refs/heads/main' }}
-
-            # Latest: v2.x releases (safe default)
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v2.') }}
-
-            # Stable: v2.x releases (alias)
-            type=raw,value=stable,enable=${{ startsWith(github.ref, 'refs/tags/v2.') }}
-
-            # Version tags (v2.0.0, 2.0.0)
-            type=ref,event=tag
-            type=semver,pattern={{version}}
+            # Sync branch image
+            type=raw,value=sync,enable=${{ github.ref == 'refs/heads/main-sync' }}
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
