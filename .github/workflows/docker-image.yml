@@ -12,7 +12,7 @@ name: Create and publish Docker images
 on:
   push:
     branches:
-      - main-sync     # Long-lived sync branch
+      - sync-main     # Long-lived sync branch
   workflow_dispatch:
 
 env:
@@ -146,7 +146,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             # Sync branch image
-            type=raw,value=sync,enable=${{ github.ref == 'refs/heads/main-sync' }}
+            type=raw,value=sync,enable=${{ github.ref == 'refs/heads/sync-main' }}
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
@@ -161,4 +161,4 @@ jobs:
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:sync
