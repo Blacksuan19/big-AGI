@@ -14,6 +14,22 @@ import { syncRegisterOrLogin } from './sync.auth';
 import { clearSyncClient, getSyncClient } from './sync.client';
 import { performFullSync } from './sync.operations';
 
+function VisibilityToggleButton(props: {
+  show: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <IconButton
+      size="sm"
+      variant="plain"
+      color="neutral"
+      onClick={props.onToggle}
+    >
+      {props.show ? <VisibilityOffRoundedIcon /> : <VisibilityRoundedIcon />}
+    </IconButton>
+  );
+}
+
 function formatTime(ms: number | null): string {
   if (!ms) return 'Never';
   return new Date(ms).toLocaleString();
@@ -50,6 +66,7 @@ export function SyncSettings() {
   const [localSyncKey, setLocalSyncKey] = React.useState(syncKey);
   const [storesReloadNeeded, setStoresReloadNeeded] = React.useState(false);
   const [showSupabaseKey, setShowSupabaseKey] = React.useState(false);
+  const [showSyncKey, setShowSyncKey] = React.useState(false);
 
   const isConfigured = !!(supabaseUrl && supabaseAnonKey && syncKey);
   const isConnected = isConfigured && !!syncUserId;
@@ -131,14 +148,10 @@ export function SyncSettings() {
           onChange={(e) => setLocalAnonKey(e.target.value)}
           disabled={isSyncing}
           endDecorator={
-            <IconButton
-              size="sm"
-              variant="plain"
-              color="neutral"
-              onClick={() => setShowSupabaseKey((show) => !show)}
-            >
-              {showSupabaseKey ? <VisibilityOffRoundedIcon /> : <VisibilityRoundedIcon />}
-            </IconButton>
+            <VisibilityToggleButton
+              show={showSupabaseKey}
+              onToggle={() => setShowSupabaseKey((show) => !show)}
+            />
           }
         />
         <FormHelperText>Use either the legacy `anon` key or the newer publishable key.</FormHelperText>
@@ -147,11 +160,17 @@ export function SyncSettings() {
       <FormControl>
         <FormLabel>Sync Passphrase</FormLabel>
         <Input
-          type="password"
+          type={showSyncKey ? 'text' : 'password'}
           placeholder="A secret phrase shared across your devices"
           value={localSyncKey}
           onChange={(e) => setLocalSyncKey(e.target.value)}
           disabled={isSyncing}
+          endDecorator={
+            <VisibilityToggleButton
+              show={showSyncKey}
+              onToggle={() => setShowSyncKey((show) => !show)}
+            />
+          }
         />
         <FormHelperText>
           The same passphrase on any device gives access to the same sync data. The passphrase is hashed client-side and never stored in plaintext.
