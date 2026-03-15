@@ -184,7 +184,7 @@ export function SyncSettings() {
             loading={isSyncing}
             disabled={isSyncing}
             onClick={handleSync}
-            startDecorator={isSyncing ? <CircularProgress size="sm" /> : <SyncRoundedIcon />}
+            startDecorator={<SyncRoundedIcon />}
           >
             Sync Now
           </Button>

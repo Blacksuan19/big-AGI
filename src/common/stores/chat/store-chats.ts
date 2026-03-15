@@ -323,6 +323,7 @@ export const useChatStore = create<ConversationsStore>()(/*devtools(*/
 
       editMessage: (conversationId: DConversationId, messageId: DMessageId, update: Partial<DMessage> | ((message: DMessage) => Partial<DMessage>), removePendingState: boolean, touchUpdated: boolean) =>
         _get()._editConversation(conversationId, conversation => {
+          const touchMessageUpdated = touchUpdated || removePendingState;
 
           const messages = conversation.messages.map((message): DMessage => {
             if (message.id !== messageId)
@@ -331,7 +332,7 @@ export const useChatStore = create<ConversationsStore>()(/*devtools(*/
             const updatedMessage: DMessage = {
               ...message,
               ...(typeof update === 'function' ? update(message) : update),
-              ...(touchUpdated && { updated: Date.now() }),
+              ...(touchMessageUpdated && { updated: Date.now() }),
             };
 
             if (removePendingState)
@@ -349,7 +350,7 @@ export const useChatStore = create<ConversationsStore>()(/*devtools(*/
           return {
             messages,
             tokenCount: messages.reduce((sum, message) => sum + 4 + message.tokenCount || 0, 3),
-            updated: touchUpdated ? Date.now() : conversation.updated,
+            updated: touchMessageUpdated ? Date.now() : conversation.updated,
           };
         }),
 

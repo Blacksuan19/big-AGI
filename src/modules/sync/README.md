@@ -73,7 +73,7 @@ There are two ways to trigger an immediate pull:
 
 | Trigger                                         | Delay        | Notes                                          |
 | ----------------------------------------------- | ------------ | ---------------------------------------------- |
-| Any chat change (new message, title edit, etc.) | 3 s debounce | Fires after the last change in a burst settles |
+| Chat becomes sync-safe after local changes      | Immediate    | Waits until there is no in-progress assistant response |
 | Tab becomes visible again                       | Immediate    | Good for catching up after background time     |
 | Window regains focus                            | Immediate    | Good fallback for browser/tab activation       |
 
@@ -82,7 +82,9 @@ immediately - auto-sync is still not a real-time channel.
 
 Notes:
 
-- This is not a realtime channel. One browser pulling does not directly wake or notify another browser. Each client only syncs when it hits its own debounce, manual pull, or local visibility/focus triggers.
+- This is not a realtime channel. One browser pulling does not directly wake or notify another browser. Each client only syncs when a local change becomes safe to sync, on manual pull, or on local visibility/focus triggers.
+- Local chat changes are not pushed while a conversation still has an in-progress assistant message. Sync waits for the response to finish, then pushes the completed conversation state.
+- Manual pull and focus/visibility catch-up use a fuller conversation reconciliation pass; normal post-edit chat sync uses dirty tracking as a lighter optimization.
 - Some browsers may appear "slower" to sync when the tab is inactive because timers and tab lifecycle work can be deferred by the browser.
 
 ### Settings stores
@@ -108,7 +110,9 @@ Implementation notes:
 
 ### Conversations
 
-- **Push**: local conversation changes are tracked incrementally as chats mutate, and only those dirty conversation IDs are serialized and upserted. Both message edits **and title changes** bump `updated`, so all changes are captured without rescanning the full local conversation list on every sync.
+- **Push**: normal post-edit sync tracks local conversation changes incrementally and uses dirty conversation IDs as an optimization. Manual/focus sync still reconciles conversations by remote presence and `updated_at`, so dirty tracking is not the source of truth for correctness.
+- **Initial seed**: on the first conversation sync for a client, existing local conversations are considered for upload so pre-existing chat history is not missed just because it was never modified after sync was enabled.
+- **Streaming safety**: conversations with an in-progress assistant response are not pushed mid-stream. When the response completes, the final assistant update bumps the conversation timestamp and the completed conversation becomes eligible for sync.
 - **Pull**: rows with `updated_at > lastConversationSyncTime` are fetched and merged.
 - **Conflict resolution**: last-write-wins per conversation, keyed by `updated_at`.
 - **Deletion**: soft-delete tombstones (`deleted_at` set, `data = null`) propagate deletes across devices.
@@ -130,28 +134,18 @@ Implementation notes:
 - After the initial pull, settings stores are only pushed when their serialized local payload changed. This avoids re-pushing models/UI settings on every chat sync cycle.
 - Pull fetches keys updated on the server since `lastStoresSyncTime` and writes them to `localStorage`. A page reload is required to activate pulled settings.
 
-### Browser notes
+### Sync behavior notes
 
-Observed during testing:
+- big-AGI uses `visibilitychange` and window focus to catch up when a tab becomes active again.
+- Local chat changes are only pushed once the conversation is in a sync-safe state, which avoids syncing partial streamed responses.
+- Initial conversation sync and manual/focus catch-up use fuller reconciliation; routine local edits use dirty tracking as a lighter optimization.
+- Conversation push/pull and asset metadata fetches are batched to avoid Supabase statement timeouts on larger histories.
 
-- Firefox can sometimes look "busy" for longer than Chromium-based browsers during sync, especially after recent local changes or when the tab was inactive.
-- Chromium-based browsers (for example Vivaldi and VS Code's simple browser) may feel more immediate in the same workflow.
-- A Firefox tab can also appear to "resume" syncing a bit later even if no new local action happened. In practice this usually means one of this client's own delayed timers finally ran after the tab became active again; another client's pull does not directly notify or wake this browser.
+Practical notes:
 
-Documented browser behavior behind this:
-
-- Background-tab timer throttling is expected browser behavior. Browsers commonly slow down `setTimeout`/`setInterval` work in hidden tabs, and Firefox documents both general background timeout budgeting and longer timer delays for inactive tabs.
-- This sync module uses ordinary browser timers for the 3-second local-change debounce, and uses visibility/focus events to catch up when a tab becomes active again.
-
-Practical workarounds:
-
-- Keep the tab active while testing sync timing.
 - Use the manual pull button when checking another device immediately after a change.
 - Treat the Sync button as the reliable "fetch now" path across devices; the automatic sync is best-effort and not a realtime transport.
-- big-AGI now reacts to `visibilitychange` and window focus to catch up when a tab becomes active again, which is more reliable than relying on a coarse background polling interval.
-- Conversation push no longer rescans the full local chat list to discover dirty chats, so larger histories should scale better even though Firefox may still show a longer loading indicator for other browser-specific reasons.
 - If settings changed, reload after pull so the updated stores are applied cleanly.
-- If a browser appears to keep syncing after a pull, wait for the current cycle to finish before comparing another device; overlapping debounce/interval activity can still make the indicator reappear briefly.
 
 ### Security & RLS
 

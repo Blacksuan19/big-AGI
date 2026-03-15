@@ -30,6 +30,7 @@ export const SyncStoreRowSchema = z.object({
 export type SyncStoreRow = z.infer<typeof SyncStoreRowSchema>;
 
 export type SyncStatus = 'idle' | 'syncing' | 'error' | 'success';
+export type SyncConversationMode = 'dirty' | 'full';
 
 export interface SyncResult {
   storesUpdated: boolean;

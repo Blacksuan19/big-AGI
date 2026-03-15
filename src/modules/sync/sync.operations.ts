@@ -7,10 +7,23 @@ import { getDBAsset, getDBAssetsUpdatedAfter, putDBAsset } from '~/modules/dblob
 import type { DBlobDBAsset } from '~/modules/dblobs/dblobs.types';
 
 import { useSyncStore } from './store-sync';
-import type { SyncResult } from './sync.types';
+import type { SyncConversationMode, SyncResult } from './sync.types';
 
 const STORAGE_BUCKET = 'sync-assets';
+const CONVERSATION_BATCH_SIZE = 20;
+const ASSET_METADATA_BATCH_SIZE = 50;
 let _isApplyingRemoteConversationChanges = false;
+
+function isConversationSyncable(conversation: ReturnType<typeof useChatStore.getState>['conversations'][number]): boolean {
+  if (conversation._abortController)
+    return false;
+
+  return !conversation.messages.some((message) => message.pendingIncomplete);
+}
+
+function isMeaningfulConversation(conversation: ReturnType<typeof useChatStore.getState>['conversations'][number]): boolean {
+  return !!(conversation.messages.length || conversation.userTitle || conversation.autoTitle);
+}
 
 export function isApplyingRemoteConversationChanges(): boolean {
   return _isApplyingRemoteConversationChanges;
@@ -36,7 +49,7 @@ const SYNC_STORE_KEYS = [
   'app-module-google-search',
 ] as const;
 
-async function syncConversations(supabase: SupabaseClient, userId: string): Promise<void> {
+async function syncConversations(supabase: SupabaseClient, userId: string, requestedMode: SyncConversationMode): Promise<void> {
   const {
     lastConversationSyncTime,
     pendingChangedConversationIds,
@@ -47,12 +60,19 @@ async function syncConversations(supabase: SupabaseClient, userId: string): Prom
   } = useSyncStore.getState();
   const now = Date.now();
   let latestSeenConversationUpdate = lastConversationSyncTime;
+  const initialConversationSync = lastConversationSyncTime === 0;
+  const mode: SyncConversationMode = initialConversationSync ? 'full' : requestedMode;
 
   const conversationsById = new Map(useChatStore.getState().conversations.map((conversation) => [conversation.id, conversation]));
-  const pendingChangedIds = [...new Set(pendingChangedConversationIds)];
-  const toUpsert = pendingChangedIds
+  const candidateConversationIds = mode === 'full'
+    ? [...conversationsById.values()]
+      .filter((conversation) => !conversation._isIncognito && isConversationSyncable(conversation) && isMeaningfulConversation(conversation))
+      .map((conversation) => conversation.id)
+    : [...new Set(pendingChangedConversationIds)];
+  const syncedChangedIds: string[] = [];
+  const candidateRows = candidateConversationIds
     .map((id) => conversationsById.get(id))
-    .filter((c): c is NonNullable<typeof c> => !!c && !c._isIncognito)
+    .filter((c): c is NonNullable<typeof c> => !!c && !c._isIncognito && isConversationSyncable(c))
     .map((c) => ({
       user_id: userId,
       conversation_id: c.id,
@@ -60,17 +80,33 @@ async function syncConversations(supabase: SupabaseClient, userId: string): Prom
       deleted_at: null,
       data: DataAtRestV1.formatChatToJsonV1(c),
     }));
+  const candidateRowIds = candidateRows.map((row) => row.conversation_id);
+  const remoteConversationVersions = await fetchConversationVersionsByIds(supabase, userId, candidateRowIds);
+
+  const skippedChangedIds: string[] = [];
+  const toUpsert = candidateRows.filter((row) => {
+    const remoteUpdatedAt = remoteConversationVersions.get(row.conversation_id);
+    const shouldPush = remoteUpdatedAt === undefined || row.updated_at >= remoteUpdatedAt;
+    if (!shouldPush)
+      skippedChangedIds.push(row.conversation_id);
+    return shouldPush;
+  });
+
+  for (const row of toUpsert)
+    syncedChangedIds.push(row.conversation_id);
   for (const row of toUpsert)
     latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, row.updated_at);
 
-  if (pendingChangedIds.length > 0 && toUpsert.length === 0)
-    clearPendingChangedConversations(pendingChangedIds);
+  if (pendingChangedConversationIds.length > 0 && pendingChangedConversationIds.every((id) => !conversationsById.has(id)))
+    clearPendingChangedConversations(pendingChangedConversationIds);
 
   if (toUpsert.length > 0) {
-    const { error } = await supabase.from('sync_conversations').upsert(toUpsert, { onConflict: 'user_id,conversation_id' });
-    if (error) throw new Error(`Push conversations failed: ${error.message}`);
-    clearPendingChangedConversations(pendingChangedIds);
+    await upsertConversationRowsInBatches(supabase, toUpsert, 'Push conversations failed');
+    clearPendingChangedConversations(syncedChangedIds);
   }
+
+  if (skippedChangedIds.length > 0)
+    clearPendingChangedConversations(skippedChangedIds);
 
   const pendingIds = [...pendingDeletedConversationIds];
   if (pendingIds.length > 0) {
@@ -82,36 +118,71 @@ async function syncConversations(supabase: SupabaseClient, userId: string): Prom
       data: null,
     }));
     latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, now);
-    const { error } = await supabase.from('sync_conversations').upsert(tombstones, { onConflict: 'user_id,conversation_id' });
-    if (error) throw new Error(`Push deletions failed: ${error.message}`);
+    await upsertConversationRowsInBatches(supabase, tombstones, 'Push deletions failed');
     clearPendingChangedConversations(pendingIds);
     clearPendingDeletedConversations(pendingIds);
   }
 
-  const { data: remoteRows, error: pullError } = await supabase
-    .from('sync_conversations')
-    .select('conversation_id, updated_at, deleted_at, data')
-    .eq('user_id', userId)
-    .gt('updated_at', lastConversationSyncTime);
-  if (pullError) throw new Error(`Pull conversations failed: ${pullError.message}`);
+  const remoteRows = await fetchRemoteConversationRowsSince(supabase, userId, lastConversationSyncTime);
 
+  let earliestDeferredRemoteUpdate: number | null = null;
   _isApplyingRemoteConversationChanges = true;
   try {
     for (const row of remoteRows ?? []) {
-      latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, row.updated_at ?? 0);
+      const remoteUpdatedAt = row.updated_at ?? 0;
+      const localConversation = useChatStore.getState().conversations.find((c) => c.id === row.conversation_id);
+      const localVersion = localConversation ? (localConversation.updated ?? localConversation.created) : 0;
+      const localBusy = !!localConversation && !isConversationSyncable(localConversation);
+
       if (row.deleted_at) {
-        const existsLocally = useChatStore.getState().conversations.some((c) => c.id === row.conversation_id);
-        if (existsLocally) useChatStore.getState().deleteConversations([row.conversation_id]);
+        if (!localConversation) {
+          latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, remoteUpdatedAt);
+          continue;
+        }
+
+        if (remoteUpdatedAt <= localVersion) {
+          latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, remoteUpdatedAt);
+          continue;
+        }
+
+        if (localBusy) {
+          earliestDeferredRemoteUpdate = earliestDeferredRemoteUpdate === null
+            ? remoteUpdatedAt
+            : Math.min(earliestDeferredRemoteUpdate, remoteUpdatedAt);
+          continue;
+        }
+
+        useChatStore.getState().deleteConversations([row.conversation_id]);
+        latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, remoteUpdatedAt);
       } else if (row.data) {
+        if (localConversation && remoteUpdatedAt <= localVersion) {
+          latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, remoteUpdatedAt);
+          continue;
+        }
+
+        if (localBusy) {
+          earliestDeferredRemoteUpdate = earliestDeferredRemoteUpdate === null
+            ? remoteUpdatedAt
+            : Math.min(earliestDeferredRemoteUpdate, remoteUpdatedAt);
+          continue;
+        }
+
         const conv = DataAtRestV1.recreateConversation(row.data);
-        if (conv) useChatStore.getState().importConversation(conv, false);
+        if (conv) {
+          useChatStore.getState().importConversation(conv, false);
+          latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, remoteUpdatedAt);
+        }
       }
     }
   } finally {
     _isApplyingRemoteConversationChanges = false;
   }
 
-  setLastConversationSyncTime(Math.max(now, latestSeenConversationUpdate));
+  let nextConversationSyncTime = Math.max(now, latestSeenConversationUpdate);
+  if (earliestDeferredRemoteUpdate !== null)
+    nextConversationSyncTime = Math.min(nextConversationSyncTime, earliestDeferredRemoteUpdate - 1);
+
+  setLastConversationSyncTime(nextConversationSyncTime);
 }
 
 async function syncBlobs(supabase: SupabaseClient, userId: string): Promise<void> {
@@ -160,13 +231,7 @@ async function syncBlobs(supabase: SupabaseClient, userId: string): Promise<void
 
   const referencedIds = _collectDblobAssetIds();
   if (referencedIds.size > 0) {
-    const { data: remoteAssets, error: metaFetchError } = await supabase
-      .from('sync_assets')
-      .select('asset_id, asset_type, mime_type, storage_path, metadata')
-      .eq('user_id', userId)
-      .in('asset_id', [...referencedIds])
-      .is('deleted_at', null);
-    if (metaFetchError) throw new Error(`Pull blob metadata failed: ${metaFetchError.message}`);
+    const remoteAssets = await fetchRemoteAssetRowsByIds(supabase, userId, [...referencedIds]);
 
     for (const row of remoteAssets ?? []) {
       const existing = await getDBAsset(row.asset_id);
@@ -285,12 +350,16 @@ async function syncStores(supabase: SupabaseClient, userId: string): Promise<boo
   return storesUpdated;
 }
 
-export async function performFullSync(supabase: SupabaseClient, userId: string): Promise<SyncResult> {
+export async function performFullSync(
+  supabase: SupabaseClient,
+  userId: string,
+  options: { conversationMode?: SyncConversationMode } = {},
+): Promise<SyncResult> {
   const { setSyncStatus, setLastSyncAt } = useSyncStore.getState();
   setSyncStatus('syncing');
 
   try {
-    await syncConversations(supabase, userId);
+    await syncConversations(supabase, userId, options.conversationMode ?? 'full');
     await syncBlobs(supabase, userId);
     const storesUpdated = await syncStores(supabase, userId);
 
@@ -328,6 +397,122 @@ function _mimeToExt(mimeType: string): string {
     'audio/wav': 'wav',
   };
   return map[mimeType] ?? 'bin';
+}
+
+async function fetchRemoteConversationRowsSince(
+  supabase: SupabaseClient,
+  userId: string,
+  sinceUpdatedAt: number,
+) {
+  const rows: {
+    conversation_id: string;
+    updated_at: number;
+    deleted_at: number | null;
+    data: any;
+  }[] = [];
+
+  let cursorUpdatedAt = sinceUpdatedAt;
+  let cursorConversationId = '';
+
+  while (true) {
+    const query = supabase
+      .from('sync_conversations')
+      .select('conversation_id, updated_at, deleted_at, data')
+      .eq('user_id', userId)
+      .or(
+        cursorConversationId
+          ? `updated_at.gt.${cursorUpdatedAt},and(updated_at.eq.${cursorUpdatedAt},conversation_id.gt.${cursorConversationId})`
+          : `updated_at.gt.${cursorUpdatedAt}`,
+      )
+      .order('updated_at', { ascending: true })
+      .order('conversation_id', { ascending: true })
+      .limit(CONVERSATION_BATCH_SIZE);
+
+    const { data, error } = await query;
+    if (error) throw new Error(`Pull conversations failed: ${error.message}`);
+
+    const batch = data ?? [];
+    rows.push(...batch);
+
+    if (batch.length < CONVERSATION_BATCH_SIZE)
+      break;
+
+    const lastRow = batch[batch.length - 1];
+    cursorUpdatedAt = lastRow.updated_at ?? cursorUpdatedAt;
+    cursorConversationId = lastRow.conversation_id ?? cursorConversationId;
+  }
+
+  return rows;
+}
+
+async function fetchConversationVersionsByIds(
+  supabase: SupabaseClient,
+  userId: string,
+  conversationIds: string[],
+): Promise<Map<string, number>> {
+  const versions = new Map<string, number>();
+
+  for (const candidateIdBatch of chunkArray(conversationIds, CONVERSATION_BATCH_SIZE)) {
+    const { data: existingRemoteRows, error: existingRemoteRowsError } = await supabase
+      .from('sync_conversations')
+      .select('conversation_id, updated_at')
+      .eq('user_id', userId)
+      .in('conversation_id', candidateIdBatch);
+    if (existingRemoteRowsError) throw new Error(`Fetch remote conversation versions failed: ${existingRemoteRowsError.message}`);
+
+    for (const row of existingRemoteRows ?? [])
+      versions.set(row.conversation_id, row.updated_at ?? 0);
+  }
+
+  return versions;
+}
+
+async function upsertConversationRowsInBatches(
+  supabase: SupabaseClient,
+  rows: Array<Record<string, any>>,
+  errorPrefix: string,
+): Promise<void> {
+  for (const rowBatch of chunkArray(rows, CONVERSATION_BATCH_SIZE)) {
+    const { error } = await supabase.from('sync_conversations').upsert(rowBatch, { onConflict: 'user_id,conversation_id' });
+    if (error) throw new Error(`${errorPrefix}: ${error.message}`);
+  }
+}
+
+async function fetchRemoteAssetRowsByIds(
+  supabase: SupabaseClient,
+  userId: string,
+  assetIds: string[],
+) {
+  const rows: {
+    asset_id: string;
+    asset_type: string;
+    mime_type: string;
+    storage_path: string;
+    metadata: any;
+  }[] = [];
+
+  for (const assetIdBatch of chunkArray(assetIds, ASSET_METADATA_BATCH_SIZE)) {
+    const { data: remoteAssets, error: metaFetchError } = await supabase
+      .from('sync_assets')
+      .select('asset_id, asset_type, mime_type, storage_path, metadata')
+      .eq('user_id', userId)
+      .in('asset_id', assetIdBatch)
+      .is('deleted_at', null);
+    if (metaFetchError) throw new Error(`Pull blob metadata failed: ${metaFetchError.message}`);
+
+    rows.push(...(remoteAssets ?? []));
+  }
+
+  return rows;
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  if (items.length === 0) return [];
+
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize)
+    chunks.push(items.slice(i, i + chunkSize));
+  return chunks;
 }
 
 function toUnixMillis(value: Date | string | number | null | undefined): number {
