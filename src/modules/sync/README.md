@@ -1,163 +1,116 @@
-# big-AGI Sync - Setup Guide
+# big-AGI Sync
 
-This module syncs all user data across devices using a self-hosted (or cloud)
-[Supabase](https://supabase.com) project.
+This module syncs big-AGI data across devices using a Supabase project you
+control.
 
-**What is synced**
+**What syncs**
 
-| Data                           | Includes                                                                 | Method                                |
-| ------------------------------ | ------------------------------------------------------------------------ | ------------------------------------- |
-| Conversations & messages       | Full history, AI auto-titles, user-set titles (incognito chats excluded) | PostgreSQL (`sync_conversations`)     |
-| Binary assets (images, audio)  | Attachments and AI-generated images referenced in chats                  | Supabase Storage bucket `sync-assets` |
-| LLM service configs & API keys | All configured providers and their API keys                              | PostgreSQL (`sync_stores`)            |
-| Personas, folders, UI settings | Custom personas, folder structure, preferences                           | PostgreSQL (`sync_stores`)            |
+| Data          | Includes                                                 | Backend                                      |
+| ------------- | -------------------------------------------------------- | -------------------------------------------- |
+| Conversations | Messages, auto-titles, user titles, deletes              | `sync_conversations`                         |
+| Assets        | Chat attachments and generated media referenced by chats | Storage bucket `sync-assets` + `sync_assets` |
+| Settings      | Models, API keys, personas, folders, UI preferences      | `sync_stores`                                |
 
-> **Privacy note:** LLM API keys stored in _Preferences -> Models_ are included
-> in the sync. Only use a Supabase project that you control or fully trust.
+Incognito conversations are excluded and remain local-only.
 
-## Installation
+> Privacy note: model API keys stored in the browser are included in sync. Only
+> use a Supabase project that you control or trust.
 
-Follow these installation steps to provision Supabase and connect big-AGI to it.
+## Setup
 
-### Step 1. Create a Supabase project
+### 1. Create a Supabase project
 
-1. Go to [app.supabase.com](https://app.supabase.com) and create a **New Project**
-   (or self-host with Docker - see [Self-hosting](#self-hosting-supabase) below).
-2. Wait for the project to be provisioned.
+Create a new project in Supabase, or use your own self-hosted deployment.
 
-### Step 2. Run the SQL schema
+### 2. Run the schema
 
-1. Open **SQL Editor** in the Supabase dashboard.
-2. Click **New query**, paste the contents of
-   [`supabase-schema.sql`](./supabase-schema.sql), and click **Run**.
+Open the Supabase SQL editor and run [`supabase-schema.sql`](./supabase-schema.sql).
 
-   This creates the four tables, their indexes, RLS policies, and the scoped
-   Storage policy all in one step.
+This creates:
 
-### Step 3. Create the Storage bucket
+- the sync tables
+- indexes
+- row-level security policies
+- the storage policy for synced assets
 
-1. Open **Storage** in the Supabase dashboard.
-2. Click **New bucket**, name it exactly **`sync-assets`**.
-3. Keep **Public bucket** **off** (private).
+### 3. Create the storage bucket
 
-   The scoped policy for this bucket was already applied in step 2 - no
-   separate policy step is needed.
+Create a private storage bucket named `sync-assets`.
 
-   > The policy restricts uploads to paths prefixed by a registered
-   > `sync_users.id`, preventing writes to arbitrary paths.
+### 4. Connect big-AGI
 
-### Step 4. Configure in big-AGI
+In big-AGI, open `Preferences -> Sync` and provide:
 
-1. In the Supabase dashboard, go to **Project Settings -> API**.
-2. Copy:
-   - **Project URL** (e.g. `https://xyz.supabase.co`)
-   - **Project API Keys -> publishable** key
-     (legacy **anon** keys also work)
-3. In big-AGI, open **Preferences -> Sync**.
-4. Paste the URL and publishable/anon key, enter a memorable **passphrase** (the same
-   passphrase on every device gives access to the same data).
-5. Click **Connect**, then **Sync Now**.
+- Supabase project URL
+- Supabase publishable key or legacy anon key
+- a passphrase shared across your devices
 
-## Using sync day-to-day
+Then click `Connect`, followed by `Sync Now`.
 
-### Pulling the latest from another device
+## Day-to-day use
 
-There are two ways to trigger an immediate pull:
+There are three ways sync runs:
 
-- **Toolbar button**: a sync icon appears in the top chat bar when sync is
-  connected. Click it to run a full sync cycle and pick up any changes made on
-  another device.
-- **Preferences -> Sync -> Sync Now**: the same full sync from inside settings.
+- local chat changes sync automatically
+- switching back to a tab or window triggers a catch-up sync
+- `Sync Now` runs an immediate manual sync
 
-### Auto-sync triggers
+This is not a realtime channel. One client syncing does not directly notify the
+others; another device catches up on focus/visibility or when you trigger a
+manual sync.
 
-| Trigger                                         | Delay        | Notes                                          |
-| ----------------------------------------------- | ------------ | ---------------------------------------------- |
-| Chat becomes sync-safe after local changes      | Immediate    | Waits until there is no in-progress assistant response |
-| Tab becomes visible again                       | Immediate    | Good for catching up after background time     |
-| Window regains focus                            | Immediate    | Good fallback for browser/tab activation       |
+If settings are pulled from another device, the Sync panel prompts for a page
+reload so those stores can be applied cleanly.
 
-Use the toolbar button whenever you want changes from another device
-immediately - auto-sync is still not a real-time channel.
-
-Notes:
-
-- This is not a realtime channel. One browser pulling does not directly wake or notify another browser. Each client only syncs when a local change becomes safe to sync, on manual pull, or on local visibility/focus triggers.
-- Local chat changes are not pushed while a conversation still has an in-progress assistant message. Sync waits for the response to finish, then pushes the completed conversation state.
-- Manual pull and focus/visibility catch-up use a fuller conversation reconciliation pass; normal post-edit chat sync uses dirty tracking as a lighter optimization.
-- Some browsers may appear "slower" to sync when the tab is inactive because timers and tab lifecycle work can be deferred by the browser.
-
-### Settings stores
-
-When settings (models, personas, folders, UI preferences) are pulled from
-another device, a **Reload** prompt appears in the Sync panel. A page reload
-is required to apply them because those stores are loaded once at startup.
-
----
-
-## Sync model
+## How it works
 
 ### Identity
 
-The passphrase is SHA-256-hashed **client-side**. Only the hash is stored in
-`sync_users.sync_key_hash`. The raw passphrase never leaves the browser. Any
-device that presents the same hash gains access to the same data.
+The passphrase is hashed client-side before use. The raw passphrase is not sent
+to Supabase.
 
-Implementation notes:
-
-- big-AGI uses Web Crypto when available and falls back to an internal SHA-256 implementation when a browser context does not expose `crypto.subtle`.
-- This avoids sync setup failures in browsers/contexts where Web Crypto is unavailable.
+big-AGI uses Web Crypto when available and falls back to an internal SHA-256
+implementation when needed.
 
 ### Conversations
 
-- **Push**: normal post-edit sync tracks local conversation changes incrementally and uses dirty conversation IDs as an optimization. Manual/focus sync still reconciles conversations by remote presence and `updated_at`, so dirty tracking is not the source of truth for correctness.
-- **Initial seed**: on the first conversation sync for a client, existing local conversations are considered for upload so pre-existing chat history is not missed just because it was never modified after sync was enabled.
-- **Streaming safety**: conversations with an in-progress assistant response are not pushed mid-stream. When the response completes, the final assistant update bumps the conversation timestamp and the completed conversation becomes eligible for sync.
-- **Pull**: rows with `updated_at > lastConversationSyncTime` are fetched and merged.
-- **Conflict resolution**: last-write-wins per conversation, keyed by `updated_at`.
-- **Deletion**: soft-delete tombstones (`deleted_at` set, `data = null`) propagate deletes across devices.
-- Incognito conversations are excluded from sync. This matches the existing chat-store behavior, where incognito conversations are intentionally filtered out before persistence, so they are treated as local-only/private rather than durable synced state.
-- Remote conversation changes applied during a pull are ignored by the auto-sync watcher, so pulling from another device does not immediately trigger a redundant local re-push.
-- This optimization mainly improves scalability for users with many chats; it reduces unnecessary local work during sync wake-ups, but browser/runtime differences can still make Firefox feel slower than Chromium-based browsers.
+- Normal local edits use dirty conversation tracking as an optimization.
+- Manual sync, focus sync, and the first sync on a client use fuller
+  reconciliation based on remote presence and `updated_at`.
+- Remote rows newer than local are pulled and merged.
+- Deletes propagate through tombstones.
+- Conflict resolution is last-write-wins by `updated_at`.
 
-### Binary assets (images, audio)
+### Assets
 
-- Assets are stored in Dexie (IndexedDB) under their original dblob nanoid. That same ID is used as the `asset_id` in `sync_assets` and as the Storage path, so fragment references resolve correctly after a pull.
-- **Push**: assets updated since `lastBlobsSyncTime` are uploaded to `sync-assets/{userId}/{assetId}.{ext}`, then a metadata row is upserted in `sync_assets`.
-- **Pull**: asset IDs referenced in local message fragments that are absent from local Dexie are downloaded from Storage and inserted.
-- If any upload fails, `lastBlobsSyncTime` is **not** advanced, so failed assets are automatically retried on the next cycle.
-- Local blob timestamps are normalized during sync so older rows that deserialize `updatedAt` as a string/number still sync correctly.
+- Changed local assets are uploaded to `sync-assets/{userId}/{assetId}.{ext}`.
+- Referenced remote assets missing from local storage are downloaded on pull.
+- Blob timestamp normalization handles older local rows whose `updatedAt` is not
+  deserialized as a `Date`.
 
-### Stores (settings)
+### Settings
 
-- On a brand-new client, stores are **pulled first** before any store push happens. This prevents an empty browser from overwriting the remote `app-models` and other settings with its local defaults.
-- After the initial pull, settings stores are only pushed when their serialized local payload changed. This avoids re-pushing models/UI settings on every chat sync cycle.
-- Pull fetches keys updated on the server since `lastStoresSyncTime` and writes them to `localStorage`. A page reload is required to activate pulled settings.
+- A new client pulls settings before pushing any local defaults.
+- After that, settings are only pushed when the serialized store payload
+  changes.
+- Pulled settings are written to `localStorage`, so a reload is required to
+  activate them.
 
-### Sync behavior notes
+## Implementation notes
 
-- big-AGI uses `visibilitychange` and window focus to catch up when a tab becomes active again.
-- Local chat changes are only pushed once the conversation is in a sync-safe state, which avoids syncing partial streamed responses.
-- Initial conversation sync and manual/focus catch-up use fuller reconciliation; routine local edits use dirty tracking as a lighter optimization.
-- Conversation push/pull and asset metadata fetches are batched to avoid Supabase statement timeouts on larger histories.
+- Remote conversation changes applied during pull are ignored by the local
+  auto-sync watcher, so pulls do not immediately re-push the same chats.
+- Large conversation and asset metadata operations are batched to avoid
+  Supabase statement timeouts on bigger histories.
 
-Practical notes:
+## Security model
 
-- Use the manual pull button when checking another device immediately after a change.
-- Treat the Sync button as the reliable "fetch now" path across devices; the automatic sync is best-effort and not a realtime transport.
-- If settings changed, reload after pull so the updated stores are applied cleanly.
+The browser uses the project's publishable or anon key. Access isolation is
+based on the sync identity and explicit `user_id` filtering in queries.
 
-### Security & RLS
-
-The anon key is embedded in every client's browser settings. RLS policies use
-`USING (true)` - Supabase will flag these as "RLS Policy Always True"
-advisories, which is **intentional**: isolation is enforced at the query level
-via explicit `user_id` filters. A valid `user_id` UUID is only obtainable by
-presenting the correct passphrase hash.
-
-For a personal or self-hosted deployment this is acceptable. For a multi-user
-shared deployment, migrate to Supabase Auth and replace the `(true)` policies
-with `auth.uid()`-based checks.
+For a personal or self-hosted setup this is usually fine. For a shared
+multi-user deployment, the better long-term path is Supabase Auth with
+user-bound policies.
 
 ## Self-hosting Supabase
 
@@ -165,10 +118,7 @@ with `auth.uid()`-based checks.
 git clone https://github.com/supabase/supabase
 cd supabase/docker
 cp .env.example .env
-# edit .env - set POSTGRES_PASSWORD, JWT_SECRET, ANON_KEY, SERVICE_ROLE_KEY, etc.
 docker compose up -d
 ```
 
-Your Project URL will be `http://localhost:8000` (Kong gateway). The anon key
-is the JWT signed with `JWT_SECRET` from `.env` - use the pre-generated keys
-from the example `.env` for local testing, or generate new ones for production.
+Then use your local Supabase URL and public client key in `Preferences -> Sync`.
