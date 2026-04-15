@@ -9,7 +9,7 @@ import { convert_Base64WithMimeType_To_Blob, convert_Blob_To_Base64 } from '~/co
 import { imageBlobConvertType, imageBlobResizeIfNeeded, LLMImageResizeMode } from '~/common/util/imageUtils';
 
 // NOTE: pay particular attention to the "import type", as this is importing from the server-side Zod definitions
-import type { AixAPIChatGenerate_Request, AixMessages_ModelMessage, AixMessages_ToolMessage, AixMessages_UserMessage, AixParts_InlineImagePart, AixParts_MetaCacheControl, AixParts_MetaInReferenceToPart, AixParts_ModelAuxPart } from '../server/api/aix.wiretypes';
+import type { AixAPIChatGenerate_Request, AixMessages_ModelMessage, AixMessages_UserMessage, AixParts_InlineImagePart, AixParts_MetaCacheControl, AixParts_MetaInReferenceToPart, AixParts_ModelAuxPart } from '../server/api/aix.wiretypes';
 
 // TODO: remove console messages to zero, or replace with throws or something
 
@@ -102,6 +102,7 @@ export async function aixCGR_SystemMessage_FromDMessageOrThrow(
           case 'image_ref':
           case 'tool_invocation':
           case 'tool_response':
+          case 'hosted_resource':
           case 'error':
           case '_pt_sentinel':
             console.warn('[DEV] aixCGR_systemMessageFromInstruction: unexpected System Content fragment', { sFragment });
@@ -362,6 +363,7 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
           case 'error':
           case 'tool_invocation':
           case 'tool_response':
+          case 'hosted_resource':
             console.warn('aixCGR_FromDMessages: unexpected Non-User fragment part type', (uFragment.part as any).pt);
             break;
 
@@ -388,10 +390,7 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
 
     } else if (dMessageRole === 'assistant') {
 
-      // Note: even tool invocations and responses were interleaved, we will bucket them in 1 model message and 1 tool message
-      // FIXME: assumption that this is the right way of handling it, rather than interleaving many messages
       const modelMessage: AixMessages_ModelMessage = { role: 'model', parts: [] };
-      const toolMessage: AixMessages_ToolMessage = { role: 'tool', parts: [] };
 
       for (const aFragment of m.fragments) {
 
@@ -522,7 +521,19 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
               if (Array.isArray(resultObject))
                 throw new Error('[AIX validation for Gemini] expecting `tool_response` to not be an array');
             }
-            toolMessage.parts.push(_vnd ? { ...aPart, _vnd } : aPart);
+            modelMessage.parts.push(_vnd ? { ...aPart, _vnd } : aPart);
+            break;
+
+          case 'hosted_resource':
+            // Hosted resources are download-only artifacts - emit a text placeholder for model context
+            // NOTE: disabled for now - we don't know how usefult this hinting it, and we're clashing with proprietary Anthropic prompts
+            // modelMessage.parts.push({
+            //   pt: 'text',
+            //   text: `[Output file: ${aPart.resource.via === 'anthropic' ? aPart.resource.fileId : 'unknown'}]`,
+            //   // ...(aPart.resource.via === 'anthropic' && {
+            //   //   _vnd: { anthropic: { containerUpload: { fileId: aPart.resource.fileId, ...(aPart.resource.containerId && { containerId: aPart.resource.containerId }) } } },
+            //   // }),
+            // });
             break;
 
           default:
@@ -532,18 +543,14 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
         }
       }
 
-      const assistantMessages: (AixMessages_ModelMessage | AixMessages_ToolMessage)[] = [];
-      if (modelMessage.parts.length > 0)
-        assistantMessages.push(modelMessage);
-      if (toolMessage.parts.length > 0)
-        assistantMessages.push(toolMessage);
+      if (modelMessage.parts.length > 0) {
 
-      // (on Assistant messages) handle the ant-cache-prompt user/auto flags, on the very last message
-      if (mHasAntCacheFlag && assistantMessages.length > 0)
-        assistantMessages[assistantMessages.length - 1].parts.push(_clientCreateAixMetaCacheControlPart('anthropic-ephemeral'));
+        // (on Assistant messages) handle the ant-cache-prompt user/auto flags, on the very last message
+        if (mHasAntCacheFlag)
+          modelMessage.parts.push(_clientCreateAixMetaCacheControlPart('anthropic-ephemeral'));
 
-      // Add the assistant messages to the chatSequence
-      acc.chatSequence.push(...assistantMessages);
+        acc.chatSequence.push(modelMessage);
+      }
 
     } else {
 

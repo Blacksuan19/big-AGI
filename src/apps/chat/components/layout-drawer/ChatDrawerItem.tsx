@@ -328,7 +328,7 @@ function ChatDrawerItem(props: {
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, whiteSpace: 'nowrap' }}>
         {searchFrequency > 0 ? (
           <Typography level='body-sm'>
-            {searchFrequency}
+            {Math.round(searchFrequency * 10) / 10}
           </Typography>
         ) : null}
         {props.showSymbols && (userFlagsSummary || containsDocAttachments || containsImageAssets) ? (
@@ -343,6 +343,7 @@ function ChatDrawerItem(props: {
         {syncIndicatorComponent}
       </Box>
     )}
+
 
   </>, [beingGenerated, containsDocAttachments, containsImageAssets, handleTitleEditBegin, handleTitleEditCancel, handleTitleEditChange, hasBeamOpen, isActive, isEditingTitle, isIncognito, isNew, personaImageURI, personaSymbol, props.showSymbols, searchFrequency, syncIndicatorComponent, title, userFlagsSummary]);
 

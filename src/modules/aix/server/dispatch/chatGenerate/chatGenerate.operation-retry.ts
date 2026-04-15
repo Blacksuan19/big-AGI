@@ -96,8 +96,8 @@ export async function* executeChatGenerateWithOperationRetry(
 
       // -> retry-server-operation - parent loop of retry-server-dispatch
       yield {
-        cg: 'retry-reset', rScope: 'srv-op',
-        rShallClear: false, // preserve particles from prior continuation turns; operation errors fire early with low/no particles
+        cg: 'aix-retry-reset', rScope: 'srv-op',
+        rClearStrategy: 'since-checkpoint', // clear current-attempt content while preserving prior continuation turns
         reason: error.reason || error.message || 'retrying operation',
         attempt: attemptNumber, maxAttempts: maxAttempts, delayMs: delayMs,
         ...(error.causeHttp ? { causeHttp: error.causeHttp } : undefined),
