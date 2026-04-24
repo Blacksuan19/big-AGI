@@ -149,6 +149,7 @@ export type DModelInterfaceV1 =
   | 'oai-chat-reasoning'
   | 'ant-prompt-caching'
   | 'gem-code-execution'
+  | 'gem-interactions'
   | 'oai-prompt-caching'
   | 'oai-realtime'
   | 'oai-responses'
@@ -168,6 +169,7 @@ export type DModelInterfaceV1 =
 // FIXME: keep this in sync with the server side on modules/llms/server/llm.server.types.ts
 export const LLM_IF_OAI_Chat: DModelInterfaceV1 = 'oai-chat';
 export const LLM_IF_OAI_Fn: DModelInterfaceV1 = 'oai-chat-fn';
+/** @deprecated we don't se this one anymore 2026-04-19; suspended until we have a reason or per-model continuos validation of this */
 export const LLM_IF_OAI_Json: DModelInterfaceV1 = 'oai-chat-json'; // for Structured Outputs (or JSON mode at worst)
 export const LLM_IF_ANT_ToolsSearch: DModelInterfaceV1 = 'ant-tools-search';
 // export const LLM_IF_OAI_JsonSchema: ... future?
@@ -179,6 +181,7 @@ export const LLM_IF_Outputs_NoText: DModelInterfaceV1 = 'outputs-no-text';
 export const LLM_IF_Tools_WebSearch: DModelInterfaceV1 = 'tools-web-search';
 export const LLM_IF_ANT_PromptCaching: DModelInterfaceV1 = 'ant-prompt-caching';
 export const LLM_IF_GEM_CodeExecution: DModelInterfaceV1 = 'gem-code-execution';
+export const LLM_IF_GEM_Interactions: DModelInterfaceV1 = 'gem-interactions';
 export const LLM_IF_OAI_PromptCaching: DModelInterfaceV1 = 'oai-prompt-caching';
 export const LLM_IF_OAI_Responses: DModelInterfaceV1 = 'oai-responses';
 export const LLM_IF_HOTFIX_NoStream: DModelInterfaceV1 = 'hotfix-no-stream';
@@ -206,6 +209,7 @@ export const LLMS_ALL_INTERFACES = [
   // Vendor-specific capabilities
   LLM_IF_ANT_PromptCaching,   // [Anthropic] model supports anthropic-specific caching
   LLM_IF_GEM_CodeExecution,   // [Gemini] Tool: code execution
+  LLM_IF_GEM_Interactions,    // [Gemini] Interactions API (required by Deep Research agents)
   LLM_IF_OAI_PromptCaching,   // [OpenAI] model supports OpenAI prompt caching
   LLM_IF_OAI_Responses,       // [OpenAI] Responses API (new) support
   // Hotfixes to patch specific model quirks

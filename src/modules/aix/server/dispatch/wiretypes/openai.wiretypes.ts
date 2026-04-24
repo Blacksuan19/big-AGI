@@ -336,8 +336,9 @@ export namespace OpenAIWire_API_Chat_Completions {
     // https://openrouter.ai/docs/api/reference/parameters#verbosity
     verbosity: z.enum([
       'low', 'medium', 'high',
-      'max', // [OpenRouter, 2026-02-06] Anthropic-through-openrouter has its effort mapped to 'verbosity'
-    ]).optional(), // 'max' is Opus 4.6 only
+      'xhigh', // [OpenRouter, 2026-04-16] Anthropic Opus 4.7+ via verbosity
+      'max', // [OpenRouter, 2026-02-06] Anthropic Opus 4.6+ via verbosity
+    ]).optional(),
     // [OpenRouter, 2025-11-11] Unified reasoning parameter for all models
     reasoning: z.object({
       max_tokens: z.int().optional(), // Token-based control (Anthropic, Gemini): 1024-32000
@@ -829,18 +830,26 @@ export namespace OpenAIWire_API_Chat_Completions {
 //
 export namespace OpenAIWire_API_Images_Generations {
 
+  /** GPT Image family models - shared between this namespace, Images_Edits, and the Responses image_generation tool. */
+  export const GptImageModels_schema = z.enum([
+    'gpt-image-2',
+    'gpt-image-1.5',
+    'gpt-image-1',
+    'gpt-image-1-mini',
+  ]);
+
   export type Request = z.infer<typeof Request_schema>;
   const Request_schema = z.object({
 
-    // 32,000 for gpt-image-1.5/gpt-image-1/gpt-image-1-mini, 4,000 for dall-e-3, 1,000 for dall-e-2
+    // 32,000 for gpt-image family, 4,000 for dall-e-3, 1,000 for dall-e-2
     prompt: z.string().max(32000),
 
-    model: z.enum([
-      'gpt-image-1.5',
-      'gpt-image-1',
-      'gpt-image-1-mini',
-      'dall-e-3',
-      'dall-e-2', // default
+    model: z.union([
+      GptImageModels_schema,
+      z.enum([
+        'dall-e-3',
+        'dall-e-2', // default
+      ]),
     ]).optional(),
 
     // The number of images to generate. Must be between 1 and 10. For dall-e-3, only n=1 is supported.
@@ -849,7 +858,7 @@ export namespace OpenAIWire_API_Images_Generations {
     // Image quality
     quality: z.enum([
       'auto',                   // default
-      'high', 'medium', 'low',  // gpt-image-1.5, gpt-image-1, gpt-image-1-mini
+      'high', 'medium', 'low',  // gpt-image
       'hd', 'standard',         // dall-e-3: hd | standard, dall-e-2: only standard
     ]).optional(),
 
@@ -875,7 +884,7 @@ export namespace OpenAIWire_API_Images_Generations {
     user: z.string().optional(),
 
 
-    // -- GPT Image Family Specific Parameters (gpt-image-1.5, gpt-image-1, gpt-image-1-mini) --
+    // -- GPT Image specific parameters --
 
     // Allows to set transparency (in that case, format = png or webp)
     background: z.enum(['transparent', 'opaque', 'auto' /* default */]).optional(),
@@ -906,7 +915,7 @@ export namespace OpenAIWire_API_Images_Generations {
       url: z.url().optional(), // if the response_format is 'url' - DEPRECATED
     })),
 
-    // GPT Image models only (gpt-image-1.5, gpt-image-1, gpt-image-1-mini)
+    // gpt-image only
     usage: z.object({
       total_tokens: z.number(),
       input_tokens: z.number() // images + text tokens in the input prompt
@@ -934,14 +943,17 @@ export namespace OpenAIWire_API_Images_Edits {
    */
   export const Request_schema = z.object({
 
-    // 32,000 for gpt-image-1.5/gpt-image-1/gpt-image-1-mini, 1,000 for dall-e-2
+    // 32,000 for gpt-image, 1,000 for dall-e-2
     prompt: z.string().max(32000),
 
     // image: file | file[] - REQUIRED - Handled as file uploads in FormData ('image' field)
 
     // mask: file - OPTIONAL - Handled as file upload in FormData ('mask' field)
 
-    model: z.enum(['gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-2']).optional(),
+    model: z.union([
+      OpenAIWire_API_Images_Generations.GptImageModels_schema,
+      z.enum(['dall-e-2' /* dall-e-3 does not do image edits */]),
+    ]).optional(),
 
     // Number of images to generate, between 1 and 10
     n: z.number().min(1).max(10).nullable().optional(),
@@ -949,7 +961,7 @@ export namespace OpenAIWire_API_Images_Edits {
     // Image quality
     quality: z.enum([
       'auto',                   // default
-      'high', 'medium', 'low',  // gpt-image-1.5, gpt-image-1, gpt-image-1-mini
+      'high', 'medium', 'low',  // gpt-image
       'standard',               // dall-e-2: only standard
     ]).optional(),
 
@@ -1109,7 +1121,8 @@ export namespace OpenAIWire_Responses_Items {
     phase: z.enum(['commentary', 'final_answer']).or(z.string()).optional(), // [OpenAI, 2026-03-03] message phase indicator for multi-phase responses
   });
 
-  const OutputReasoningItem = _OutputItemBase_schema.extend({
+  export type OutputReasoningItem = z.infer<typeof OutputReasoningItem_schema>;
+  export const OutputReasoningItem_schema = _OutputItemBase_schema.extend({
     type: z.literal('reasoning'),
     /**
      * ID seems missing from the reasoning output (at least in response.reasoning_summary_part.added),
@@ -1197,17 +1210,20 @@ export namespace OpenAIWire_Responses_Items {
     id: z.string(), // unique ID of the image generation call (output item ID)
     result: z.string().optional(), // base64 image data when completed
     revised_prompt: z.string().optional(), // the revised prompt used for generation
-    // BREAKING CHANGE from OpenAI - 2025-09-30
-    // redefining the following because we need 'generating' too here
+    // Docs: "in_progress" | "completed" | "generating" | "failed".
+    // 'incomplete' kept as defensive carryover from OutputItemBase (not doc'd for this item).
     status: z.enum([
-      'generating', // 2025-09-30: seen on OpenAI for `image_generation_call` items
-      'in_progress', 'completed', 'incomplete',
+      'in_progress', 'completed', 'generating', 'failed',
+      'incomplete', // defensive: not in docs for image_generation_call, but harmless to accept
     ]).optional(),
-    // Echoed configuration from the tool request - used to infer mime type for the result
+    // Echoed configuration from the tool request - the API returns these on the done item with
+    // RESOLVED values (e.g. size:"auto" becomes "1536x1024"). Confirmed live on 2026-04-21 log.
     output_format: z.enum(['png' /* default */, 'jpeg', 'webp']).optional(),
-    // NOTE: we also see the following echoed in the image_generation_call item
+    // NOTE: we also see the following echoed in the image_generation_call item, but don't make use of them for now
     // background: z.enum(['transparent', 'opaque', 'auto' /* default */]).optional(),
     // quality: z.enum(['auto', 'high', 'medium', 'low']).optional(),
+    // size: z.enum(['1024x1024', '1024x1536', '1536x1024', 'auto']).or(z.string()).optional(),
+    // action: z.enum(['generate', 'edit', 'auto']).or(z.string()).optional(),
   });
 
   // const OutputMCPCallItem_schema = _OutputItemBase_schema.extend({
@@ -1265,7 +1281,7 @@ export namespace OpenAIWire_Responses_Items {
   export const OutputItem_schema = z.union([
     // Text output
     OutputContentItem_schema, // assistant/tool message/refusal
-    OutputReasoningItem,
+    OutputReasoningItem_schema,
 
     // Client tool invocation output
     OutputFunctionCallItem_schema,
@@ -1423,29 +1439,32 @@ export namespace OpenAIWire_Responses_Tools {
     search_context_size: z.enum(['low', 'medium', 'high']).optional(),
     user_location: z.object({
       type: z.literal('approximate'),
-      city: z.string().optional(),
-      country: z.string().optional(),
-      region: z.string().optional(),
-      timezone: z.string().optional(),
+      // API echoes these as `null` when unset, not omitted - so .nullish()
+      city: z.string().nullish(),
+      country: z.string().nullish(),
+      region: z.string().nullish(),
+      timezone: z.string().nullish(),
     }).optional(),
     external_web_access: z.boolean().optional(),
   });
 
   const ImageGenerationTool_schema = z.object({
     type: z.literal('image_generation'),
+    /** Whether to generate a new image or edit an existing image. Default: auto. */
+    action: z.enum(['generate', 'edit', 'auto']).or(z.string()).optional(),
     background: z.enum(['transparent', 'opaque', 'auto']).optional(), // defaults to 'auto'
     /**
      * Control how much effort the model will exert to match the style and features, especially facial features, of input images.
-     * Defaults to 'low'.
+     * Supported for gpt-image-1 / gpt-image-1.5+ (not gpt-image-1-mini). Defaults to 'low'.
      */
     input_fidelity: z.enum(['high', 'low']).optional(),
     input_image_mask: z.object({
       file_id: z.string().optional(), // File ID for the mask image
       image_url: z.string().optional(), // Base64-encoded mask image
     }).optional(),
-    /** 'gpt-image-1' (default), leaks suggest also 'gpt-image-0721-mini-alpha' */
-    model: z.string().optional(),
-    /** Note: 'low' is unconfirmed here. Defaults to 'auto' */
+    /** gpt-image family, relaxed with .or(z.string()) for forward-compat with new models. */
+    model: OpenAIWire_API_Images_Generations.GptImageModels_schema.or(z.string()).optional(),
+    /** Defaults to 'auto' */
     moderation: z.enum(['low', 'auto']).optional(),
     output_compression: z.number().min(0).max(100).int().optional(), // defaults to 100
     /** One of [png, webp, or jpeg]. Default: png. */
@@ -1454,8 +1473,10 @@ export namespace OpenAIWire_Responses_Tools {
     partial_images: z.number().int().min(0).max(3).optional(),
     /** Quality of the generated image. Defaults to 'auto' */
     quality: z.enum(['low', 'medium', 'high', 'auto']).optional(),
-    /** The size of the generated image. One of 1024x1024, 1024x1536, 1536x1024, or auto. Default: auto. */
-    size: z.enum(['1024x1024', '1024x1536', '1536x1024', 'auto']).optional(),
+    /** Default: auto */
+    size: z.enum(['1024x1024', '1024x1536', '1536x1024', 'auto']).or(z.string()).optional(),
+    // Not supported in the request, echoed by the API, but always 1
+    // n: z.number().int().optional(),
   });
 
   // Code Interpreter tool - runs Python code in a sandboxed container
@@ -1580,10 +1601,10 @@ export namespace OpenAIWire_API_Responses {
     include: z.array(z.enum([
       'web_search_call.action.sources', // get web search citations
       'code_interpreter_call.outputs', // get code execution logs and images
+      'reasoning.encrypted_content', // get per-reasoning-item encrypted blob for stateless multi-turn continuity
       // 'file_search_call.results',
       // 'message.input_image.image_url',
       // 'computer_call_output.output.image_url',
-      // 'reasoning.encrypted_content',
     ])).optional(), // additional output to include in the response
     user: z.string().optional(), // stable identifier for your end-users
 
@@ -1615,6 +1636,13 @@ export namespace OpenAIWire_API_Responses {
     error: z.object({ code: z.string(), message: z.string() }).nullish(), // (null)
 
     model: z.string(), // model used for the response
+
+    // echo of requested tools but with all properties values - can be used by the parser to enrich hosted-tool messages
+    // NOTE: .catch() gracefully degrades to undefined since this is a non-critical enrichment path
+    tools: z.array(OpenAIWire_Responses_Tools.Tool_schema).optional().catch((ctx) => {
+      console.warn('[DEV] AIX: OpenAI Responses: unable to parse echoed tools, ignoring:', { tools: ctx.value });
+      return;
+    }),
 
     output: z.array(OpenAIWire_Responses_Items.OutputItem_schema),
 
@@ -1648,7 +1676,6 @@ export namespace OpenAIWire_API_Responses {
     // temperature: ... // 1
     // text: ... // { .. }
     // tool_choice: ... // 'auto'
-    // tools: ... // e.g. [{ type: 'web_search_preview', search_context_size: 'medium', ... }]
     // top_logprobs: ... // 0
     // top_p: ... // 1
     // truncation: ... // 'disabled'
@@ -1850,6 +1877,12 @@ export namespace OpenAIWire_API_Responses {
     type: z.literal('response.image_generation_call.partial_image'),
     partial_image_b64: z.string(), // base64 partial image
     partial_image_index: z.number(), // 0-based index
+    // NOTE: observed on the wire (not in the OpenAI docs, but consistently echoed), but not used/useful yet.
+    //       these carry the RESOLVED values even when the request used 'auto' (e.g. size:"auto" -> "1536x1024").
+    // output_format: z.enum(['png', 'jpeg', 'webp']).or(z.string()).optional(),
+    // background: z.enum(['transparent', 'opaque', 'auto']).or(z.string()).optional(),
+    // quality: z.enum(['low', 'medium', 'high', 'auto']).or(z.string()).optional(),
+    // size: z.enum(['1024x1024', '1024x1536', '1536x1024', 'auto']).or(z.string()).optional(),
   });
 
   const OutputImageGenerationCallCompletedEvent_schema = _OutputIndexedEvent_schema.extend({

@@ -31,7 +31,7 @@ import { wireOllamaListModelsSchema, wireOllamaModelInfoSchema } from './ollama/
 
 // protocol: OpenAI-compatible
 import type { OpenAIWire_API_Models_List } from '~/modules/aix/server/dispatch/wiretypes/openai.wiretypes';
-import { llmsHostnameMatches, OPENAI_API_PATHS, openAIAccess } from './openai/openai.access';
+import { OPENAI_API_PATHS, openAIAccess } from './openai/openai.access';
 import { alibabaModelFilter, alibabaModelSort, alibabaModelToModelDescription } from './openai/models/alibaba.models';
 import { arceeAIHeuristic, arceeAIModelsToModelDescriptions } from './openai/models/arceeai.models';
 import { azureDeploymentFilter, azureDeploymentToModelDescription, azureParseFromDeploymentsAPI } from './openai/models/azure.models';
@@ -40,8 +40,9 @@ import { deepseekModelFilter, deepseekModelSort, deepseekModelToModelDescription
 import { fastAPIHeuristic, fastAPIModels } from './openai/models/fastapi.models';
 import { fireworksAIHeuristic, fireworksAIModelsToModelDescriptions } from './openai/models/fireworksai.models';
 import { groqModelFilter, groqModelSortFn, groqModelToModelDescription, groqValidateModelDefs_DEV } from './openai/models/groq.models';
-import { minimaxHardcodedModelDescriptions, minimaxHeuristic } from './openai/models/minimax.models';
 import { llmapiHeuristic, llmapiModelsToModelDescriptions } from './openai/models/llmapi.models';
+import { llmsIsNativeOpenAIHost } from '../shared/llm.isomorphic';
+import { minimaxHardcodedModelDescriptions, minimaxHeuristic } from './openai/models/minimax.models';
 import { novitaHeuristic, novitaModelsToModelDescriptions } from './openai/models/novita.models';
 import { lmStudioFetchModels, lmStudioModelsToModelDescriptions } from './openai/models/lmstudio.models';
 import { localAIModelSortFn, localAIModelToModelDescription } from './openai/models/localai.models';
@@ -124,27 +125,22 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
           // [DEV] check for stale/unknown model definitions
           llmsAntValidateModelDefs_DEV(availableModels);
 
-          // sort by: family (desc) > class (desc) > date (desc) -- Future NOTE: -5- will match -4-5- and -3-5-.. figure something else out
-          const familyPrecedence = ['-4-7-', '-4-6', '-4-5-', '-4-1-', '-4-', '-3-7-', '-3-5-', '-3-'];
+          // sort by: family version (desc) > class (desc) > date (desc)
+          // Extracts N.M from the id (e.g. `-4-7` -> 4.7, `-4-` -> 4.0). The (?!\d) guards against dates.
+          const familyVer = (id: string): number => {
+            const m = id.match(/-(\d)(?:-(\d)(?!\d))?/);
+            return m ? +m[1] + (m[2] ? +m[2] / 10 : 0) : 0;
+          };
           const classPrecedence = ['-opus-', '-sonnet-', '-haiku-'];
-
-          const getFamilyIdx = (id: string) => familyPrecedence.findIndex(f => id.includes(f));
           const getClassIdx = (id: string) => classPrecedence.findIndex(c => id.includes(c));
 
-          // cast the models to the common schema
           return availableModels
             .sort((a, b) => {
-              const familyA = getFamilyIdx(a.id);
-              const familyB = getFamilyIdx(b.id);
-              const classA = getClassIdx(a.id);
-              const classB = getClassIdx(b.id);
-
-              // family desc (lower index = better, -1 = unknown goes last)
-              if (familyA !== familyB) return (familyA === -1 ? 999 : familyA) - (familyB === -1 ? 999 : familyB);
-              // class desc
+              const v = familyVer(b.id) - familyVer(a.id);
+              if (v !== 0) return v;
+              const classA = getClassIdx(a.id), classB = getClassIdx(b.id);
               if (classA !== classB) return (classA === -1 ? 999 : classA) - (classB === -1 ? 999 : classB);
-              // date desc (newer first) - string comparison works since format is YYYYMMDD
-              return b.id.localeCompare(a.id);
+              return b.id.localeCompare(a.id); // date desc (YYYYMMDD string compare)
             })
             .map((apiModel): ModelDescriptionSchema => {
               // merge API-provided metadata (token limits, effort levels) with hardcoded definition
@@ -510,8 +506,7 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
                 return fastAPIModels(maybeModels);
 
               // [OpenAI or OpenAI-compatible]: chat-only models, custom sort, manual mapping
-              const oaiClientHost = access.oaiHost;
-              const isNotOpenai = !!(oaiClientHost && !llmsHostnameMatches(oaiClientHost, 'api.openai.com')); // empty host (uses default) or explicitly api.openai.com
+              const isNotOpenai = !llmsIsNativeOpenAIHost(access.oaiHost); // native = empty host (uses default) or explicitly api.openai.com
               const models = maybeModels
                 // limit to only 'gpt' and 'non instruct' models
                 .filter(openAIModelFilter)

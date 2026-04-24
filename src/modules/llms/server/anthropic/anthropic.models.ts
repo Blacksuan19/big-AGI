@@ -1,7 +1,7 @@
 import * as z from 'zod/v4';
 
 import type { DModelParameterId } from '~/common/stores/llms/llms.parameters';
-import { LLM_IF_ANT_PromptCaching, LLM_IF_ANT_ToolsSearch, LLM_IF_OAI_Chat, LLM_IF_OAI_Fn, LLM_IF_OAI_Reasoning, LLM_IF_OAI_Vision } from '~/common/stores/llms/llms.types';
+import { LLM_IF_ANT_PromptCaching, LLM_IF_ANT_ToolsSearch, LLM_IF_HOTFIX_NoTemperature, LLM_IF_OAI_Chat, LLM_IF_OAI_Fn, LLM_IF_OAI_Reasoning, LLM_IF_OAI_Vision } from '~/common/stores/llms/llms.types';
 import { Release } from '~/common/app.release';
 
 import type { ModelDescriptionSchema, OrtVendorLookupResult } from '../llm.server.types';
@@ -16,23 +16,35 @@ import { llmDevCheckModels_DEV } from '../models.mappings';
 // configuration
 const DEV_DEBUG_ANTHROPIC_MODELS = (Release.TenantSlug as any) === 'staging' /* ALSO IN STAGING! */ || Release.IsNodeDevBuild;
 
-// Cap the API-reported max_input_tokens to this value for contextWindow.
-// The Anthropic API reports 1M for models that support extended context, but 1M requires
-// a beta header and has tiered pricing - we let the llmVndAnt1MContext parameter opt-in.
-// Set to `false` to use raw API values (useful for debugging mismatches).
+// Cap applied ONLY to models that declare the `llmVndAnt1MContext` opt-in parameter
+// (Sonnet 4.5 / Sonnet 4 - beta 1M with tiered pricing, retiring 2026-04-30).
+// For models with 1M GA at standard pricing (Opus 4.7/4.6, Sonnet 4.6 since 2026-03-13),
+// we report the API-provided context window as-is (1M) and do NOT add the opt-in.
+// Set to `false` to disable the cap entirely (useful for debugging mismatches).
 const ANT_CAP_CONTEXT_WINDOW: number | false = 200_000;
+
+/** True if the model uses the opt-in `llmVndAnt1MContext` beta path (Sonnet 4.5 / Sonnet 4). */
+function _hasLegacy1MContextOptIn(model: Pick<ModelDescriptionSchema, 'parameterSpecs'>): boolean {
+  return !!model.parameterSpecs?.some(s => s.paramId === 'llmVndAnt1MContext');
+}
 
 
 
 const IF_4 = [LLM_IF_OAI_Chat, LLM_IF_OAI_Vision, LLM_IF_OAI_Fn, LLM_IF_ANT_PromptCaching];
 const IF_4_R = [...IF_4, LLM_IF_OAI_Reasoning];
+// 4.7+: temperature/top_p/top_k return 400; HOTFIX strips temperature client-side (top_p handled in dispatch)
+const IF_47 = [...IF_4, LLM_IF_HOTFIX_NoTemperature];
+const IF_47_R = [...IF_4_R, LLM_IF_HOTFIX_NoTemperature];
 
 
 // Anthropic Parameters Semantics:
-// - llmVndAntEffort             Anthropic effort: each model declares its subset via enumValues
-// - llmVndAnt1MContext         only available on select models
+// - llmVndAntEffort             Anthropic effort: each model declares its subset via enumValues. 4.7 adds `xhigh`.
+// - llmVndAnt1MContext         required for Sonnet 4.5 / Sonnet 4 (beta, tiered pricing, retiring 2026-04-30).
+//                              Not needed for Opus 4.7/4.6 and Sonnet 4.6 (1M GA at standard pricing since 2026-03-13).
 // - llmVndAntSkills            2026-02-06: seems GA to any model now: a parameter spec for user/UI configurability
-// - llmVndAntThinkingBudget    2026-02-06: deprecated since 4.6 in favor of adaptive thinking, was used for manual control of thinking up to 4.5, we pre-default it to 16384 and the user can set it to another value or null to turn thinking off
+// - llmVndAntThinkingBudget    2026-02-06: deprecated since 4.6 in favor of adaptive thinking; 4.7 REMOVES manual budgets
+//                              entirely (adaptive-only). We keep the param (hidden, initialValue -1) as our "force adaptive"
+//                              sentinel on 4.6/4.7 thinking variants, and for manual budget control on 4.5/earlier.
 // - llmVndAntWebFetch/Search   seem an API feature available on all models
 
 const ANT_TOOLS: Exclude<ModelDescriptionSchema['parameterSpecs'], undefined> = [
@@ -54,6 +66,20 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
 
   // NOTE: what's not redefined below is inherited from the underlying model definition
 
+  // Claude 4.7 models with thinking variants (adaptive-only, manual budgets removed)
+  'claude-opus-4-7': {
+    idVariant: 'thinking',
+    label: 'Claude Opus 4.7 (Adaptive)',
+    description: 'Claude Opus 4.7 with adaptive thinking for the most complex reasoning and agentic coding',
+    interfaces: [...IF_47_R, LLM_IF_ANT_ToolsSearch],
+    parameterSpecs: [
+      { paramId: 'llmVndAntThinkingBudget', hidden: true, initialValue: -1 /* FORCE adaptive - 4.7 rejects budget_tokens */ },
+      { paramId: 'llmVndAntEffort', enumValues: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      ...ANT_TOOLS_DYNAMIC,
+    ],
+    benchmark: { cbaElo: 1504 }, // claude-opus-4-7-thinking
+  },
+
   // Claude 4.6 models with thinking variants
   'claude-opus-4-6': {
     idVariant: 'thinking',
@@ -63,11 +89,10 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
     parameterSpecs: [
       { paramId: 'llmVndAntThinkingBudget', hidden: true, initialValue: -1 /* FORCE adaptive */ },
       { paramId: 'llmVndAntEffort', enumValues: ['low', 'medium', 'high', 'max'] },
-      { paramId: 'llmVndAnt1MContext' },
       { paramId: 'llmVndAntInfSpeed' },
       ...ANT_TOOLS_DYNAMIC,
     ],
-    // benchmark: { cbaElo: ... }, // TBD
+    benchmark: { cbaElo: 1502 }, // claude-opus-4-6-thinking
   },
 
   'claude-sonnet-4-6': {
@@ -78,10 +103,9 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
     parameterSpecs: [
       { paramId: 'llmVndAntThinkingBudget', hidden: true, initialValue: -1 /* FORCE adaptive */ },
       { paramId: 'llmVndAntEffort', enumValues: ['low', 'medium', 'high', 'max'] },
-      { paramId: 'llmVndAnt1MContext' },
       ...ANT_TOOLS_DYNAMIC,
     ],
-    // benchmark: { cbaElo: ... }, // TBD
+    benchmark: { cbaElo: 1463 + 1 }, // 1 (thinking) + claude-sonnet-4-6
   },
 
   // Claude 4.5 models with thinking variants
@@ -95,7 +119,7 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
       { paramId: 'llmVndAntEffort', enumValues: ['low', 'medium', 'high'] },
       ...ANT_TOOLS,
     ],
-    benchmark: { cbaElo: 1468 }, // claude-opus-4-5-20251101-thinking-32k
+    benchmark: { cbaElo: 1473 }, // claude-opus-4-5-20251101-thinking-32k
     maxCompletionTokens: 32000,
   },
 
@@ -110,7 +134,7 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
       { paramId: 'llmVndAnt1MContext' },
       ...ANT_TOOLS,
     ],
-    benchmark: { cbaElo: 1450 }, // claude-sonnet-4-5-20250929-thinking-32k
+    benchmark: { cbaElo: 1452 }, // claude-sonnet-4-5-20250929-thinking-32k
   },
 
   'claude-haiku-4-5-20251001': {
@@ -123,6 +147,7 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
       { paramId: 'llmVndAntThinkingBudget' },
       ...ANT_TOOLS,
     ],
+    benchmark: { cbaElo: 1408 + 1 }, // 1 (thinking) + claude-haiku-4-5-20251001
   },
 
   // Claude 4.1 models with thinking variants
@@ -136,7 +161,7 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
       { paramId: 'llmVndAntThinkingBudget' },
       ...ANT_TOOLS,
     ],
-    benchmark: { cbaElo: 1448 }, // claude-opus-4-1-20250805-thinking-16k
+    benchmark: { cbaElo: 1449 }, // claude-opus-4-1-20250805-thinking-16k
   },
 
   // Claude 4 models with thinking variants
@@ -165,7 +190,7 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
       { paramId: 'llmVndAnt1MContext' },
       ...ANT_TOOLS,
     ],
-    benchmark: { cbaElo: 1400 }, // claude-sonnet-4-20250514-thinking-32k
+    benchmark: { cbaElo: 1399 }, // claude-sonnet-4-20250514-thinking-32k
   },
 
   // Changes to the thinking variant (same model ID) for the Claude Sonnet 3.7 model
@@ -179,7 +204,7 @@ const _hardcodedAnthropicThinkingVariants: ModelVariantMap & { [id: string]: { i
       { paramId: 'llmVndAntThinkingBudget' },
       ...ANT_TOOLS,
     ],
-    benchmark: { cbaElo: 1389 }, // claude-3-7-sonnet-20250219-thinking-32k
+    benchmark: { cbaElo: 1387 }, // claude-3-7-sonnet-20250219-thinking-32k
   },
 
 } as const;
@@ -191,59 +216,56 @@ export function llmsAntInjectVariants(acc: ModelDescriptionSchema[], model: Mode
 
 export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: boolean })[] = [
 
+  // Claude 4.7 models
+  {
+    id: 'claude-opus-4-7', // Active - 2026-04-16
+    label: 'Claude Opus 4.7',
+    description: 'Most capable generally available model for complex reasoning and agentic coding',
+    contextWindow: 1_000_000, // 1M GA at standard pricing (no opt-in required)
+    maxCompletionTokens: 128000,
+    interfaces: [...IF_47, LLM_IF_ANT_ToolsSearch],
+    parameterSpecs: [
+      { paramId: 'llmVndAntEffort', enumValues: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      ...ANT_TOOLS_DYNAMIC,
+    ],
+    // Opus 4.7: flat $5/$25 pricing across entire 1M context window (no long-context premium, no fast mode)
+    // Breaking changes vs 4.6: extended thinking budgets removed (adaptive-only), temperature/top_p/top_k rejected,
+    // thinking content omitted by default, new tokenizer (~1x to 1.35x tokens for same text), no prefill.
+    chatPrice: { input: 5, output: 25, cache: { cType: 'ant-bp', read: 0.50, write: 6.25, duration: 300 } },
+    benchmark: { cbaElo: 1497 }, // claude-opus-4-7
+  },
+
   // Claude 4.6 models
   {
     id: 'claude-opus-4-6', // Active
     label: 'Claude Opus 4.6',
-    description: 'Most intelligent model for building agents and coding, with adaptive thinking',
-    contextWindow: 200000,
+    description: 'Previous most intelligent model for complex agents and coding, with adaptive thinking',
+    contextWindow: 1_000_000, // 1M GA at standard pricing since 2026-03-13 (no opt-in required)
     maxCompletionTokens: 128000,
     interfaces: [...IF_4, LLM_IF_ANT_ToolsSearch],
     parameterSpecs: [
       { paramId: 'llmVndAntEffort', enumValues: ['low', 'medium', 'high', 'max'] },
-      { paramId: 'llmVndAnt1MContext' },
       { paramId: 'llmVndAntInfSpeed' },
       ...ANT_TOOLS_DYNAMIC,
     ],
-    // Note: Tiered pricing - ≤200K: $5/$25, >200K: $10/$37.50 (with 1M context enabled)
-    // Cache pricing also tiered: write 1.25× input, read 0.10× input
-    chatPrice: {
-      input: [{ upTo: 200000, price: 5 }, { upTo: null, price: 10 }],
-      output: [{ upTo: 200000, price: 25 }, { upTo: null, price: 37.50 }],
-      cache: {
-        cType: 'ant-bp',
-        read: [{ upTo: 200000, price: 0.50 }, { upTo: null, price: 1.00 }],
-        write: [{ upTo: 200000, price: 6.25 }, { upTo: null, price: 12.50 }],
-        duration: 300,
-      },
-    },
-    // benchmark: { cbaElo: ... }, // TBD
+    // Opus 4.6: flat $5/$25 pricing (1M context GA at standard pricing since 2026-03-13, no opt-in required)
+    chatPrice: { input: 5, output: 25, cache: { cType: 'ant-bp', read: 0.50, write: 6.25, duration: 300 } },
+    benchmark: { cbaElo: 1496 }, // claude-opus-4-6
   },
   {
     id: 'claude-sonnet-4-6', // Active
     label: 'Claude Sonnet 4.6',
     description: 'Best combination of speed and intelligence for everyday tasks',
-    contextWindow: 200000,
-    maxCompletionTokens: 128000,
+    contextWindow: 1_000_000, // 1M GA at standard pricing since 2026-03-13 (no opt-in required)
+    maxCompletionTokens: 128000, // docs say 64000, API reports 128000
     interfaces: [...IF_4, LLM_IF_ANT_ToolsSearch],
     parameterSpecs: [
       { paramId: 'llmVndAntEffort', enumValues: ['low', 'medium', 'high', 'max'] },
-      { paramId: 'llmVndAnt1MContext' },
       ...ANT_TOOLS_DYNAMIC,
     ],
-    // Note: Tiered pricing - ≤200K: $3/$15, >200K: $6/$22.50 (with 1M context enabled)
-    // Cache pricing also tiered: write 1.25× input, read 0.10× input
-    chatPrice: {
-      input: [{ upTo: 200000, price: 3 }, { upTo: null, price: 6 }],
-      output: [{ upTo: 200000, price: 15 }, { upTo: null, price: 22.50 }],
-      cache: {
-        cType: 'ant-bp',
-        read: [{ upTo: 200000, price: 0.30 }, { upTo: null, price: 0.60 }],
-        write: [{ upTo: 200000, price: 3.75 }, { upTo: null, price: 7.50 }],
-        duration: 300,
-      },
-    },
-    // benchmark: { cbaElo: ... }, // TBD
+    // Sonnet 4.6: flat $3/$15 pricing (1M context GA at standard pricing since 2026-03-13, no opt-in required)
+    chatPrice: { input: 3, output: 15, cache: { cType: 'ant-bp', read: 0.30, write: 3.75, duration: 300 } },
+    benchmark: { cbaElo: 1463 }, // claude-sonnet-4-6
   },
 
   // Claude 4.5 models
@@ -259,7 +281,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
       ...ANT_TOOLS,
     ],
     chatPrice: { input: 5, output: 25, cache: { cType: 'ant-bp', read: 0.50, write: 6.25, duration: 300 } },
-    benchmark: { cbaElo: 1466 }, // claude-opus-4-5-20251101
+    benchmark: { cbaElo: 1469 }, // claude-opus-4-5-20251101
   },
   {
     id: 'claude-sonnet-4-5-20250929', // Active
@@ -269,7 +291,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     maxCompletionTokens: 64000,
     interfaces: [...IF_4, LLM_IF_ANT_ToolsSearch],
     parameterSpecs: [
-      { paramId: 'llmVndAnt1MContext' },
+      { paramId: 'llmVndAnt1MContext' }, // 1M context beta retires 2026-04-30 for this model
       ...ANT_TOOLS,
     ],
     // Note: Tiered pricing - ≤200K: $3/$15, >200K: $6/$22.50 (with 1M context enabled)
@@ -284,7 +306,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
         duration: 300,
       },
     },
-    benchmark: { cbaElo: 1450 }, // claude-sonnet-4-5-20250929
+    benchmark: { cbaElo: 1452 }, // claude-sonnet-4-5-20250929
   },
   {
     id: 'claude-haiku-4-5-20251001', // Active
@@ -295,7 +317,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     interfaces: IF_4,
     parameterSpecs: ANT_TOOLS,
     chatPrice: { input: 1, output: 5, cache: { cType: 'ant-bp', read: 0.10, write: 1.25, duration: 300 } },
-    benchmark: { cbaElo: 1403 }, // claude-haiku-4-5-20251001
+    benchmark: { cbaElo: 1408 }, // claude-haiku-4-5-20251001
   },
 
   // Claude 4.1 models
@@ -308,31 +330,33 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     interfaces: IF_4,
     parameterSpecs: ANT_TOOLS,
     chatPrice: { input: 15, output: 75, cache: { cType: 'ant-bp', read: 1.50, write: 18.75, duration: 300 } },
-    benchmark: { cbaElo: 1445 }, // claude-opus-4-1-20250805
+    benchmark: { cbaElo: 1447 }, // claude-opus-4-1-20250805
   },
 
   // Claude 4 models
   {
-    hidden: true, // superseded by 4.1
-    id: 'claude-opus-4-20250514', // Active
-    label: 'Claude Opus 4',
-    description: 'Previous flagship model',
+    hidden: true, // Deprecated: April 14, 2026 | Retiring: June 15, 2026 | Replacement: claude-opus-4-7
+    id: 'claude-opus-4-20250514', // Deprecated
+    label: 'Claude Opus 4 [Deprecated]',
+    description: 'Previous flagship model. Deprecated April 14, 2026, retiring June 15, 2026.',
     contextWindow: 200000,
     maxCompletionTokens: 32000,
     interfaces: IF_4,
     parameterSpecs: ANT_TOOLS,
     chatPrice: { input: 15, output: 75, cache: { cType: 'ant-bp', read: 1.50, write: 18.75, duration: 300 } },
-    benchmark: { cbaElo: 1414 }, // claude-opus-4-20250514
+    benchmark: { cbaElo: 1412 }, // claude-opus-4-20250514
+    isLegacy: true,
   },
   {
-    id: 'claude-sonnet-4-20250514', // Active
-    label: 'Claude Sonnet 4',
-    description: 'High-performance model',
+    hidden: true, // Deprecated: April 14, 2026 | Retiring: June 15, 2026 | Replacement: claude-sonnet-4-6
+    id: 'claude-sonnet-4-20250514', // Deprecated
+    label: 'Claude Sonnet 4 [Deprecated]',
+    description: 'High-performance model. Deprecated April 14, 2026, retiring June 15, 2026.',
     contextWindow: 200000,
     maxCompletionTokens: 64000,
     interfaces: IF_4,
     parameterSpecs: [
-      { paramId: 'llmVndAnt1MContext' },
+      { paramId: 'llmVndAnt1MContext' }, // 1M context beta retires 2026-04-30 for this model
       ...ANT_TOOLS,
     ],
     // Note: Tiered pricing - ≤200K: $3/$15, >200K: $6/$22.50 (with 1M context enabled)
@@ -347,7 +371,8 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
         duration: 300,
       },
     },
-    benchmark: { cbaElo: 1390 }, // claude-sonnet-4-20250514
+    benchmark: { cbaElo: 1389 }, // claude-sonnet-4-20250514
+    isLegacy: true,
   },
 
   // Claude 3.7 models
@@ -360,7 +385,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     interfaces: IF_4,
     parameterSpecs: ANT_TOOLS,
     chatPrice: { input: 3, output: 15, cache: { cType: 'ant-bp', read: 0.30, write: 3.75, duration: 300 } },
-    benchmark: { cbaElo: 1372 }, // claude-3-7-sonnet-20250219
+    benchmark: { cbaElo: 1371 }, // claude-3-7-sonnet-20250219
     hidden: true, // retired
     isLegacy: true,
   },
@@ -377,7 +402,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     interfaces: IF_4,
     parameterSpecs: ANT_TOOLS,
     chatPrice: { input: 0.80, output: 4.00, cache: { cType: 'ant-bp', read: 0.08, write: 1.00, duration: 300 } },
-    benchmark: { cbaElo: 1324 }, // claude-3-5-haiku-20241022
+    benchmark: { cbaElo: 1323 }, // claude-3-5-haiku-20241022
     hidden: true, // retired
     isLegacy: true,
   },
@@ -393,7 +418,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     maxCompletionTokens: 4096,
     interfaces: IF_4,
     chatPrice: { input: 0.25, output: 1.25, cache: { cType: 'ant-bp', read: 0.03, write: 0.30, duration: 300 } },
-    benchmark: { cbaElo: 1262 }, // claude-3-haiku-20240307
+    benchmark: { cbaElo: 1260 }, // claude-3-haiku-20240307
     isLegacy: true,
   },
 
@@ -497,11 +522,12 @@ function _llmsAntCheckApiCapabilities_DEV(availableModels: AnthropicWire_API_Mod
     if (apiModel.max_tokens && hc.maxCompletionTokens && apiModel.max_tokens !== hc.maxCompletionTokens)
       console.log(`[DEV] Anthropic '${apiModel.id}': maxCompletionTokens mismatch - hardcoded=${hc.maxCompletionTokens}, api=${apiModel.max_tokens}`);
 
-    // contextWindow vs max_input_tokens
+    // contextWindow vs max_input_tokens (only cap if the model uses the opt-in beta path)
     if (apiModel.max_input_tokens) {
-      const expectedBase = ANT_CAP_CONTEXT_WINDOW ? Math.min(apiModel.max_input_tokens, ANT_CAP_CONTEXT_WINDOW) : apiModel.max_input_tokens;
+      const shouldCap = _hasLegacy1MContextOptIn(hc) && !!ANT_CAP_CONTEXT_WINDOW;
+      const expectedBase = shouldCap ? Math.min(apiModel.max_input_tokens, ANT_CAP_CONTEXT_WINDOW) : apiModel.max_input_tokens;
       if (hc.contextWindow !== null && hc.contextWindow !== expectedBase)
-        console.log(`[DEV] Anthropic '${apiModel.id}': contextWindow mismatch - hardcoded=${hc.contextWindow}, api=${apiModel.max_input_tokens}${ANT_CAP_CONTEXT_WINDOW ? ` (capped=${expectedBase})` : ''}`);
+        console.log(`[DEV] Anthropic '${apiModel.id}': contextWindow mismatch - hardcoded=${hc.contextWindow}, api=${apiModel.max_input_tokens}${shouldCap ? ` (capped=${expectedBase})` : ''}`);
     }
 
     // effort enumValues mismatch
@@ -562,22 +588,20 @@ export function llmsAntCreatePlaceholderModel(model: AnthropicWire_API_Models_Li
       parameterSpecs.push({ paramId: 'llmVndAntThinkingBudget' });
   }
 
-  // 1M context param heuristic
-  const maxInputTokens = model.max_input_tokens;
-  if (ANT_CAP_CONTEXT_WINDOW && maxInputTokens && maxInputTokens > ANT_CAP_CONTEXT_WINDOW)
-    parameterSpecs.push({ paramId: 'llmVndAnt1MContext' });
-
   // +standard tool params
+  // Note: 1M context is GA for recent Anthropic models - we do NOT add the `llmVndAnt1MContext` opt-in
+  // for unknown models. If a 0-day model still requires the beta header (rare now), users can hit it
+  // through a hardcoded definition instead.
   parameterSpecs.push(...ANT_TOOLS);
 
-  const defaultContextWindow = ANT_CAP_CONTEXT_WINDOW || 200_000;
+  const maxInputTokens = model.max_input_tokens;
   return {
     id: model.id,
     idVariant: '::placeholder',
     label: model.display_name,
     created: Math.round(new Date(model.created_at).getTime() / 1000),
     description: 'Newest model, description not available yet.',
-    contextWindow: maxInputTokens ? (ANT_CAP_CONTEXT_WINDOW ? Math.min(maxInputTokens, ANT_CAP_CONTEXT_WINDOW) : maxInputTokens) : defaultContextWindow,
+    contextWindow: maxInputTokens ?? 200_000, // report API value as-is (no cap for unknown models)
     maxCompletionTokens: model.max_tokens || 32768,
     interfaces,
     parameterSpecs,
@@ -598,9 +622,12 @@ export function llmsAntFuseModelKnowledge(knownModel: ModelDescriptionSchema, ap
   if (!updated.created && apiModel.created_at)
     updated = { ...updated, created: Math.round(new Date(apiModel.created_at).getTime() / 1000) };
 
-  // API-authoritative: context window (optionally capped - the 1M context param handles the rest)
+  // API-authoritative: context window
+  // Only cap when the model uses the `llmVndAnt1MContext` opt-in (beta 1M path, e.g. Sonnet 4.5 / 4).
+  // For models with 1M GA at standard pricing (no opt-in), we report the API value as-is.
   if (apiModel.max_input_tokens) {
-    const apiContextWindow = ANT_CAP_CONTEXT_WINDOW ? Math.min(apiModel.max_input_tokens, ANT_CAP_CONTEXT_WINDOW) : apiModel.max_input_tokens;
+    const shouldCap = _hasLegacy1MContextOptIn(updated) && !!ANT_CAP_CONTEXT_WINDOW;
+    const apiContextWindow = shouldCap ? Math.min(apiModel.max_input_tokens, ANT_CAP_CONTEXT_WINDOW) : apiModel.max_input_tokens;
     if (updated.contextWindow !== apiContextWindow)
       updated = { ...updated, contextWindow: apiContextWindow };
   }

@@ -4,14 +4,18 @@ import { bedrockAccessAsync, bedrockResolveRegion, bedrockURLMantle, bedrockURLR
 import { geminiAccess } from '~/modules/llms/server/gemini/gemini.access';
 import { ollamaAccess } from '~/modules/llms/server/ollama/ollama.access';
 
+import { fetchResponseOrTRPCThrow, TRPCFetcherError } from '~/server/trpc/trpc.router.fetchers';
+
 import type { AixAPI_Access, AixAPI_Model, AixAPI_ResumeHandle, AixAPIChatGenerate_Request, AixWire_Particles } from '../../api/aix.wiretypes';
 import type { AixDemuxers } from '../stream.demuxers';
 
 import { GeminiWire_API_Generate_Content } from '../wiretypes/gemini.wiretypes';
+import { GeminiInteractionsWire_API_Interactions } from '../wiretypes/gemini.interactions.wiretypes';
 
 import { aixAnthropicHostedFeatures, aixToAnthropicMessageCreate } from './adapters/anthropic.messageCreate';
 import { aixToBedrockConverse } from './adapters/bedrock.converse';
 import { aixToGeminiGenerateContent } from './adapters/gemini.generateContent';
+import { aixToGeminiInteractionsCreate } from './adapters/gemini.interactionsCreate';
 import { aixToOpenAIChatCompletions } from './adapters/openai.chatCompletions';
 import { aixToOpenAIResponses } from './adapters/openai.responsesCreate';
 import { aixToXAIResponses } from './adapters/xai.responsesCreate';
@@ -21,6 +25,7 @@ import { createAnthropicFileInlineTransform } from './parsers/anthropic.transfor
 import { createAnthropicMessageParser, createAnthropicMessageParserNS } from './parsers/anthropic.parser';
 import { createBedrockConverseParserNS, createBedrockConverseStreamParser } from './parsers/bedrock-converse.parser';
 import { createGeminiGenerateContentResponseParser } from './parsers/gemini.parser';
+import { createGeminiInteractionsParser } from './parsers/gemini.interactions.parser';
 import { createOpenAIChatCompletionsChunkParser, createOpenAIChatCompletionsParserNS } from './parsers/openai.parser';
 import { createOpenAIResponseParserNS, createOpenAIResponsesEventParser } from './parsers/openai.responses.parser';
 
@@ -29,6 +34,8 @@ import { createOpenAIResponseParserNS, createOpenAIResponsesEventParser } from '
 
 export type ChatGenerateDispatch = {
   request: ChatGenerateDispatchRequest;
+  /** Used by dialects that need multi-step I/O. The returned response is consumed normally via demuxerFormat/chatGenerateParse */
+  customConnect?: (signal: AbortSignal) => Promise<Response>;
   bodyTransform?: AixDemuxers.StreamBodyTransform;
   demuxerFormat: AixDemuxers.StreamDemuxerFormat;
   chatGenerateParse: ChatGenerateParseFunction;
@@ -49,8 +56,12 @@ export type ChatGenerateParseFunction = (partTransmitter: IParticleTransmitter, 
  * 1->1 particle transform applied by the executor to every emitted particle.
  * Return the input for pass-through, or a new particle to replace it.
  * Thrown errors are caught by the executor and fall back to the original particle.
+ *
+ * Set `csfUnsafe` to true if the transform cannot be performed by CSF (e.g. relies on
+ * relies on server-side fetch. The CSF entry point strips these transforms and delegates to the
+ * ContentReassembler's transforms instead (which shall operate on the same particles).
  */
-export type ChatGenerateParticleTransformFunction = (particle: AixWire_Particles.ChatGenerateOp) => Promise<AixWire_Particles.ChatGenerateOp>;
+export type ChatGenerateParticleTransformFunction = ((particle: AixWire_Particles.ChatGenerateOp) => Promise<AixWire_Particles.ChatGenerateOp>) & { csfUnsafe?: true };
 
 
 // -- Specialized Implementations -- Core of Server-side AI Vendors abstraction --
@@ -158,9 +169,28 @@ export async function createChatGenerateDispatch(access: AixAPI_Access, model: A
     }
 
     case 'gemini':
-      /**
-       * [Gemini, 2025-04-17] For newer thinking parameters, use v1alpha (we only see statistically better results)
-       */
+      const requestedModelName = model.id.replace('models/', '');
+
+      // [Gemini Interactions API - ALPHA TEST] SSE-native: POST with stream=true, upstream returns event-stream we pipe through the fast-sse demuxer.
+      if (model.vndGeminiAPI === 'interactions-agent') {
+        const request: ChatGenerateDispatchRequest = {
+          ...geminiAccess(access, null, GeminiInteractionsWire_API_Interactions.postPath, false),
+          method: 'POST',
+          body: aixToGeminiInteractionsCreate(model, chatGenerate),
+        };
+        return {
+          request,
+          // Custom-connect so we can neutralize the outer retrier on HTTP errors: a retried POST would create a second (billable) Deep Research interaction upstream
+          customConnect: (signal) => fetchResponseOrTRPCThrow({ ...request, signal, name: 'Aix.Gemini.Interactions.create', throwWithoutName: true })
+            .catch((error: any) => {
+              if (signal.aborted) throw error; // preserve abort identity for the executor's abort classifier
+              throw new Error(`Gemini Interactions POST: ${error?.message || 'upstream error'}`); // rewrapping TRPCFetcherError as plain Error makes the retrier treat it as non-retryable
+            }),
+          demuxerFormat: 'fast-sse',
+          chatGenerateParse: createGeminiInteractionsParser(requestedModelName),
+        };
+      }
+
       const useV1Alpha = false; // !!model.vndGeminiShowThoughts || model.vndGeminiThinkingBudget !== undefined;
       return {
         request: {
@@ -170,7 +200,7 @@ export async function createChatGenerateDispatch(access: AixAPI_Access, model: A
         },
         // we verified that 'fast-sse' works well with Gemini
         demuxerFormat: streaming ? 'fast-sse' : null,
-        chatGenerateParse: createGeminiGenerateContentResponseParser(model.id.replace('models/', ''), streaming),
+        chatGenerateParse: createGeminiGenerateContentResponseParser(requestedModelName, streaming),
       };
 
     /**
@@ -261,8 +291,9 @@ export async function createChatGenerateDispatch(access: AixAPI_Access, model: A
 
 
 /**
- * Specializes to the correct vendor a request for resuming chat generation (OpenAI Responses API only).
- * Constructs a GET request to retrieve and stream a response by its ID.
+ * Specializes to the correct vendor a request for reattaching to an in-progress upstream run.
+ * - OpenAI Responses API: GET /v1/responses/{id} to resume streaming from a response id
+ * - Gemini Interactions API: GET-poll /v1beta/interactions/{id} to resume a Deep Research run
  */
 export async function createChatGenerateResumeDispatch(access: AixAPI_Access, resumeHandle: AixAPI_ResumeHandle, streaming: boolean): Promise<ChatGenerateDispatch> {
 
@@ -273,7 +304,9 @@ export async function createChatGenerateResumeDispatch(access: AixAPI_Access, re
     case 'openrouter':
 
       // ASSUME the OpenAI Responses API - https://platform.openai.com/docs/api-reference/responses/get
-      const { url, headers } = openAIAccess(access, '', `${OPENAI_API_PATHS.responses}/${resumeHandle.responseId}`);
+      if (resumeHandle.uht !== 'vnd.oai.responses')
+        throw new Error(`Resume handle mismatch for ${dialect}: expected 'vnd.oai.responses', got '${resumeHandle.uht}'`);
+      const { url, headers } = openAIAccess(access, '', `${OPENAI_API_PATHS.responses}/${resumeHandle.runId /* OpenAI response.id */}`);
       const queryParams = new URLSearchParams({
         stream: streaming ? 'true' : 'false',
         ...(!!resumeHandle.startingAfter && { starting_after: resumeHandle.startingAfter.toString() }),
@@ -286,6 +319,18 @@ export async function createChatGenerateResumeDispatch(access: AixAPI_Access, re
         chatGenerateParse: streaming ? createOpenAIResponsesEventParser() : createOpenAIResponseParserNS(),
       };
 
+    case 'gemini': {
+      // [Gemini Interactions] Reattach via SSE stream - GET /interactions/{id}?stream=true replays all events from the start (intentional - client's ContentReassembler replaces message content on reattach; partial resume via last_event_id is deliberately NOT used).
+      if (resumeHandle.uht !== 'vnd.gem.interactions')
+        throw new Error(`Resume handle mismatch for gemini: expected 'vnd.gem.interactions', got '${resumeHandle.uht}'`);
+      const { url: _baseUrl, headers: _headers } = geminiAccess(access, null, GeminiInteractionsWire_API_Interactions.getPath(resumeHandle.runId /* Gemini interaction.id */), false);
+      return {
+        request: { url: `${_baseUrl}${_baseUrl.includes('?') ? '&' : '?'}stream=true`, method: 'GET', headers: _headers },
+        demuxerFormat: 'fast-sse',
+        chatGenerateParse: createGeminiInteractionsParser(null /* model name unknown at resume time - caller's DMessage already has it */),
+      };
+    }
+
     default:
       const _exhaustiveCheck: never = dialect;
     // fallthrough
@@ -293,7 +338,6 @@ export async function createChatGenerateResumeDispatch(access: AixAPI_Access, re
     case 'anthropic':
     case 'bedrock':
     case 'deepseek':
-    case 'gemini':
     case 'groq':
     case 'lmstudio':
     case 'localai':
@@ -308,5 +352,76 @@ export async function createChatGenerateResumeDispatch(access: AixAPI_Access, re
       // Throw on unsupported protocols (Azure and OpenRouter are speculatively supported)
       throw new Error(`Resume not supported for dialect: ${dialect}`);
 
+  }
+}
+
+
+// -- Delete Upstream Handle --
+
+export type ChatGenerateDeleteResult = {
+  ok: boolean; // server-side acknowledged removal (2xx or 404-already-gone)
+  httpStatus?: number;
+  message?: string; // optional detail, typically present on failure
+};
+
+/**
+ * Delete an upstream-stored run by handle. One-shot DELETE, no streaming, no parser.
+ * Symmetric to `createChatGenerateResumeDispatch` but terminal: removes the server-side
+ * resource so no future reattach is possible.
+ *
+ * Policy:
+ * - 2xx -> ok: true
+ * - 404 -> ok: true (already gone upstream; caller should clear the local handle)
+ * - everything else -> ok: false with status/message for the caller to render
+ * - abort passes through as a thrown AbortError/TRPCFetcherError
+ *
+ * NOTE on provider semantics (observed 2026-04-23):
+ * - Gemini: returns 200 for any valid-shaped interaction id, whether it actually existed or not.
+ *   So `ok: true` here means "the handle is now terminal for reattach purposes", NOT "we proved
+ *   a deletion happened". Fine for our UX contract (button disappears, reattach will fail).
+ * - OpenAI Responses: TBA
+ * - Don't surface a "deleted successfully" message to users based on `ok` alone - it'd overclaim.
+ */
+export async function executeChatGenerateDelete(access: AixAPI_Access, handle: AixAPI_ResumeHandle, abortSignal: AbortSignal): Promise<ChatGenerateDeleteResult> {
+  const { dialect } = access;
+
+  let url: string;
+  let headers: HeadersInit;
+  let name: string;
+
+  switch (dialect) {
+    case 'gemini':
+      if (handle.uht !== 'vnd.gem.interactions')
+        throw new Error(`Delete handle mismatch for gemini: expected 'vnd.gem.interactions', got '${handle.uht}'`);
+      ({ url, headers } = geminiAccess(access, null, GeminiInteractionsWire_API_Interactions.deletePath(handle.runId), false));
+      name = 'Aix.Gemini.Interactions.delete';
+      break;
+
+    case 'azure':
+    case 'openai':
+    case 'openrouter':
+      if (handle.uht !== 'vnd.oai.responses')
+        throw new Error(`Delete handle mismatch for ${dialect}: expected 'vnd.oai.responses', got '${handle.uht}'`);
+      ({ url, headers } = openAIAccess(access, '', `${OPENAI_API_PATHS.responses}/${handle.runId}`));
+      name = `Aix.${dialect}.Responses.delete`;
+      break;
+
+    default:
+      throw new Error(`Delete not supported for dialect '${dialect}'`);
+  }
+
+  try {
+    const response = await fetchResponseOrTRPCThrow({ url, method: 'DELETE', headers, signal: abortSignal, name, throwWithoutName: true });
+    return { ok: response.ok, httpStatus: response.status };
+  } catch (error: any) {
+    if (abortSignal.aborted) throw error; // let the caller handle abort
+    // 404 = already removed upstream; treat as success so the client clears its handle
+    if (error instanceof TRPCFetcherError && error.httpStatus === 404)
+      return { ok: true, httpStatus: 404, message: 'Already removed upstream' };
+    return {
+      ok: false,
+      httpStatus: error instanceof TRPCFetcherError ? error.httpStatus : undefined,
+      message: error?.message || 'Delete failed',
+    };
   }
 }

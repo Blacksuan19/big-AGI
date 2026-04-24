@@ -34,6 +34,18 @@ const VP_PERSISTENCE_DELAY = 500; // persistence of vision for voidPlaceholders
 //   | 'interleaved-log' // batch VP OPs, but interleave them with the other content
 //   ;
 
+/**
+ * Performs 1:1 particle transformation before Reassembly. Executed on client.
+ *
+ * Two-phase design:
+ *  - shallTransform(particle) - sync gate: cheap check whether this transform applies (avoids async overhead)
+ *  - transform(particle) - async: performs the actual work and returns a replacement particle, or null to pass through unchanged.
+ */
+export interface ReassemblerParticleTransforms {
+  shallTransform(particle: AixWire_Particles.ChatGenerateOp): boolean;
+  transform(particle: AixWire_Particles.ChatGenerateOp): Promise<AixWire_Particles.ChatGenerateOp | null>;
+}
+
 
 /**
  * Internal reassembly state - extends the streaming type with reassembly-internal fields.
@@ -80,9 +92,10 @@ export class ContentReassembler {
     initialGenerator: DMessageGenerator,
     aiInspectorTransport: undefined | AixClientDebugger.Transport,
     aiInspectorContext: undefined | AixClientDebugger.Context,
+    private readonly particleTransforms: ReassemblerParticleTransforms[],
     private readonly skipImageCompression?: boolean,
-    private readonly wireAbortSignal?: AbortSignal,
     private readonly onInlineAudio?: (audio: { blob: Blob; mimeType: string; label: string; durationMs?: number }) => void,
+    private readonly wireAbortSignal?: AbortSignal,
   ) {
     this.initialState = {
       // AixChatGenerateContent_LL fields:
@@ -140,6 +153,10 @@ export class ContentReassembler {
     if (tsr) this.S.generator = { ...this.S.generator, tokenStopReason: tsr };
     // termination -> User/AI issue message
     if (errorMessage) this._appendErrorFragment(errorMessage);
+
+    // clean completion -> remove upstreamHandle (SET in onResponseHandle, CLEARED here on clean completion)
+    if (outcome === 'completed' && this.S.generator.upstreamHandle)
+      this._clearGeneratorUpstreamHandle();
 
 
     // Fragment finalization heuristics:
@@ -293,6 +310,21 @@ export class ContentReassembler {
   /// Particle Reassembly ///
 
   async #reassembleParticle(op: AixWire_Particles.ChatGenerateOp): Promise<void> {
+
+    // Reassembler Particle Transforms
+    for (const ct of this.particleTransforms)
+      if (ct.shallTransform(op)) {
+        try {
+          const replacement = await ct.transform(op);
+          if (replacement) {
+            op = replacement; // continue to the switch with the transformed particle
+            break; // first matching transform wins
+          }
+        } catch (error: any) {
+          console.log('[ContentReassembler] client particle transform failed, using original particle', { error: error?.message || error });
+        }
+      }
+
     switch (true) {
 
       // TextParticleOp
@@ -304,7 +336,7 @@ export class ContentReassembler {
       // PartParticleOp
       case 'p' in op:
         // heuristics to remove the placeholder if real user-destined content arrives
-        if (op.p !== '❤' && op.p !== 'vp' && op.p !== 'urlc' && op.p !== 'svs')
+        if (op.p !== '❤' && op.p !== 'vp' && op.p !== 'urlc' && op.p !== 'hres' && op.p !== 'svs' && op.p !== 'tr_' && op.p !== 'trs')
           await this._removeLastVoidPlaceholderDelayed();
         switch (op.p) {
           case '❤':
@@ -649,6 +681,8 @@ export class ContentReassembler {
       this._pushFragment(zyncImageAssetFragmentWithLegacy);
     } catch (error: any) {
       console.warn('[DEV] Failed to add inline image to DBlobs:', { label, error, inputType, base64Length: inputBase64.length });
+      // User-visible error fragment so a silent dblob/resize failure doesn't look like "image just didn't arrive"
+      this._appendErrorFragment(`Failed to process image: ${error?.message || 'Unknown error'}`, 'aix-image-processing');
     }
   }
 
@@ -734,6 +768,12 @@ export class ContentReassembler {
     // destructure
     const { text, mot, opId, state, parentOpId, iTexts, oTexts } = os;
 
+    // Pin cts to the upstream handle's original createdAt when the op IS the run (opId === runId,
+    // e.g. Gemini Deep Research where operationOpId === interaction.id). The reassembler preserves
+    // the earliest createdAt for a given runId across reattaches, so cts survives reloads.
+    const uh = this.S.generator.upstreamHandle;
+    const anchorCts = (uh && uh.runId === opId && uh.createdAt != null) ? uh.createdAt : Date.now();
+
     const newEntry: DVoidPlaceholderMOp = {
       opId,
       text,
@@ -743,7 +783,7 @@ export class ContentReassembler {
       ...oTexts ? { oTexts } : undefined,
       ...parentOpId ? { parentOpId } : undefined,
       level: 0,
-      cts: Date.now(),
+      cts: anchorCts,
     };
 
     const phIdx = this.S.fragments.findLastIndex(isVoidPlaceholderFragment);
@@ -815,6 +855,14 @@ export class ContentReassembler {
       return;
     }
 
+    // Guard: OpenAI reasoningItem state must land on the ma (reasoning) fragment that produced it.
+    // If no summary was appended during the reasoning item (summary disabled / skipped), the last
+    // fragment will belong to an unrelated preceding item - dropping the handle is safer than contaminating.
+    if (vs.vendor === 'openai' && 'reasoningItem' in vs.state && lastFragment.part.pt !== 'ma') {
+      console.warn('[ContentReassembler] OpenAI reasoningItem state without preceding ma fragment - dropping continuity handle', { lastFragmentPt: lastFragment.part.pt });
+      return;
+    }
+
     // attach fragment-level vendor state
     this._replaceFragmentAt(lastIdx, {
       ...lastFragment,
@@ -832,6 +880,11 @@ export class ContentReassembler {
   }
 
   private async _removeLastVoidPlaceholderDelayed(): Promise<boolean> {
+    // NOTE: disabled because it also introduces visual bugs - instead added tr_ and trs exceptions on a caller
+    // function _isVPNotOp(f: DMessageFragment) {
+    //   // make 'vp' fragments eligible for removal only if they have no opLog entries, like tool invocations (the explicit counterpart)
+    //   return isVoidPlaceholderFragment(f) && !f.part.opLog?.length;
+    // }
     // skip if none
     if (this.S.fragments.findLastIndex(isVoidPlaceholderFragment) < 0) return false;
 
@@ -885,9 +938,13 @@ export class ContentReassembler {
         'cg-issue': { outcome: 'failed', tsr: 'issue' },
         // model completed but with a specific stop condition
         'out-of-tokens': { outcome: 'completed', tsr: 'out-of-tokens' },
-        'filter-content': { outcome: 'completed', tsr: 'filter' },
-        'filter-recitation': { outcome: 'completed', tsr: 'filter' },
-        'filter-refusal': { outcome: 'completed', tsr: 'filter' },
+        // filter-triggered terminations - treated as failures so all surfaces (chat, beam, etc.) render the error state uniformly
+        // emitted by: OpenAI content_filter, Gemini SAFETY/BLOCKLIST/PROHIBITED_CONTENT/SPII/IMAGE_*, Bedrock content filter
+        'filter-content': { outcome: 'failed', tsr: 'filter', errorMessage: 'Response blocked by the provider\'s content filter.' },
+        // emitted by: Gemini RECITATION/IMAGE_RECITATION (note: can be FP-prone on benign content like code/quotes)
+        'filter-recitation': { outcome: 'failed', tsr: 'filter', errorMessage: 'Response blocked - potential copyrighted/recited content.' },
+        // emitted by: Anthropic stop_reason=refusal, Gemini LANGUAGE (unsupported)
+        'filter-refusal': { outcome: 'failed', tsr: 'filter', errorMessage: 'Response refused by the provider\'s safety filter.' },
       } as const;
       if (dialectTokenStopReason in classification)
         return classification[dialectTokenStopReason];
@@ -1015,12 +1072,26 @@ export class ContentReassembler {
 
   private onResponseHandle({ handle }: Extract<AixWire_Particles.ChatGenerateOp, { cg: 'set-upstream-handle' }>): void {
     // validate the handle
-    if (handle?.uht !== 'vnd.oai.responses' || !handle?.responseId || handle?.expiresAt === undefined) {
+    const knownUht = handle?.uht === 'vnd.oai.responses' || handle?.uht === 'vnd.gem.interactions';
+    if (!knownUht || !handle?.runId || handle.createdAt === undefined || handle.expiresAt === undefined) {
       this._appendReassemblyDevError(`Invalid response handle received: ${JSON.stringify(handle)}`);
       return;
     }
+
+    // Preserve earliest-observed timestamps for a given runId: on reattach the server emits fresh server-clock
+    // values but the original createdAt is the truth we want to keep (so retention is measured from creation, not reattach).
+    const existing = this.S.generator.upstreamHandle;
+    if (existing && existing.runId === handle.runId && existing.createdAt !== null && handle.createdAt !== null && existing.createdAt <= handle.createdAt)
+      return; // no-op: existing handle already carries the earliest createdAt for this runId
+
     // type check point for AixWire_Particles.ChatControlOp('set-upstream-handle') -> DUpstreamResponseHandle
     this.S.generator = { ...this.S.generator, upstreamHandle: handle };
+  }
+
+  private _clearGeneratorUpstreamHandle(): void {
+    if (!this.S.generator?.upstreamHandle) return;
+    const { upstreamHandle, ...rest } = this.S.generator;
+    this.S.generator = rest;
   }
 
 

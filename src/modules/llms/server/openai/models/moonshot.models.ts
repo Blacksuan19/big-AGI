@@ -26,23 +26,36 @@ const _PS_Reasoning: ModelDescriptionSchema['parameterSpecs'] = [
 
 /**
  * Moonshot AI (Kimi) models.
- * - models list and pricing: https://platform.moonshot.ai/docs/pricing/chat
- * - API docs: https://platform.moonshot.ai/docs/api/chat
- * - updated: 2026-01-26
+ * - models list and pricing: https://platform.kimi.ai/docs/pricing/chat (was platform.moonshot.ai - now 301 redirect)
+ * - API docs: https://platform.kimi.ai/docs/api/chat
+ * - updated: 2026-04-20
  */
 const _knownMoonshotModels: ManualMappings = [
 
-  // Kimi K2.5 Series
+  // Kimi K2.6 Series - Current flagship (native multimodal, thinking + non-thinking)
+  {
+    idPrefix: 'kimi-k2.6',
+    label: 'Kimi K2.6',
+    description: 'Native multimodal flagship (text, image, video inputs) with thinking and non-thinking modes. Stronger long-form coding, improved instruction compliance and self-correction. 256K context.',
+    contextWindow: 262144,
+    maxCompletionTokens: 32768,
+    interfaces: IF_K2_5,
+    parameterSpecs: _PS_Reasoning,
+    chatPrice: { input: 0.95, output: 4.00, cache: { cType: 'oai-ac', read: 0.16 } },
+    // benchmark: { cbaElo: ... } // not available yet
+  },
+
+  // Kimi K2.5 Series - still API-listed; pricing page no longer documents it (superseded by K2.6)
   {
     idPrefix: 'kimi-k2.5',
     label: 'Kimi K2.5',
-    description: 'Most intelligent Kimi model with native multimodal architecture. Supports vision (images/videos), thinking mode, and Agent tasks. Open-source SoTA in coding and visual understanding. 256K context.',
+    description: 'Supports vision (images/videos), thinking mode, and Agent tasks. 256K context.',
     contextWindow: 262144,
     maxCompletionTokens: 32768,
     interfaces: IF_K2_5,
     parameterSpecs: _PS_Reasoning,
     chatPrice: { input: 0.60, output: 3.00, cache: { cType: 'oai-ac', read: 0.10 } },
-    benchmark: { cbaElo: 1450 }, // kimi-k2.5-thinking
+    benchmark: { cbaElo: 1451 }, // kimi-k2.5-thinking
   },
 
   // Kimi K2 Series - Latest Models
@@ -57,7 +70,7 @@ const _knownMoonshotModels: ManualMappings = [
     interfaces: IF_K2_REASON,
     // parameterSpecs: [{ paramId: 'llmVndMoonshotWebSearch' }], // NOT WORKING YET
     chatPrice: { input: 1.15, output: 8.00, cache: { cType: 'oai-ac', read: 0.15 } },
-    benchmark: { cbaElo: 1429 }, // kimi-k2-thinking-turbo
+    benchmark: { cbaElo: 1430 }, // kimi-k2-thinking-turbo
   },
   // Thinking
   {
