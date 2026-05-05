@@ -834,11 +834,11 @@ export class ContentReassembler {
 
   }
 
-  private onSetVendorState(vs: Extract<AixWire_Particles.PartParticleOp, { p: 'svs' }>): void {
+  private onSetVendorState({ state, vendor }: Extract<AixWire_Particles.PartParticleOp, { p: 'svs' }>): void {
 
     // Promote Anthropic container state -> Generator (message-scoped, for cross-turn reuse)
-    if (vs.vendor === 'anthropic' && 'container' in vs.state) {
-      const { id, expiresAt } = vs.state.container;
+    if (vendor === 'anthropic' && 'container' in state) {
+      const { id, expiresAt } = state.container;
       if (id && expiresAt)
         this.S.generator = {
           ...this.S.generator,
@@ -855,11 +855,12 @@ export class ContentReassembler {
       return;
     }
 
-    // Guard: OpenAI reasoningItem state must land on the ma (reasoning) fragment that produced it.
+    // Guard: reasoningItem state must land on the ma (reasoning) fragment that produced it.
     // If no summary was appended during the reasoning item (summary disabled / skipped), the last
     // fragment will belong to an unrelated preceding item - dropping the handle is safer than contaminating.
-    if (vs.vendor === 'openai' && 'reasoningItem' in vs.state && lastFragment.part.pt !== 'ma') {
-      console.warn('[ContentReassembler] OpenAI reasoningItem state without preceding ma fragment - dropping continuity handle', { lastFragmentPt: lastFragment.part.pt });
+    // Applies to both OpenAI and xAI namespaces; each is opaque/private to its producing vendor.
+    if ((vendor === 'openai' || vendor === 'xai') && 'reasoningItem' in state && lastFragment.part.pt !== 'ma') {
+      console.warn(`[ContentReassembler] ${vendor} reasoningItem state without preceding ma fragment - dropping continuity handle`, { lastFragmentPt: lastFragment.part.pt });
       return;
     }
 
@@ -868,7 +869,7 @@ export class ContentReassembler {
       ...lastFragment,
       vendorState: {
         ...lastFragment.vendorState,
-        [vs.vendor]: vs.state,
+        [vendor]: state,
       },
     });
   }
@@ -905,9 +906,18 @@ export class ContentReassembler {
   /**
    * Stores raw termination data from the wire - classification deferred to finalizeReassembly()
    */
-  private onCGEnd({ terminationReason, tokenStopReason }: Extract<AixWire_Particles.ChatGenerateOp, { cg: 'end' }>): void {
+  private onCGEnd({ terminationReason, tokenStopReason, tokenStopError }: Extract<AixWire_Particles.ChatGenerateOp, { cg: 'end' }>): void {
+    // Diagnostic: detect late 'end' particles overriding a prior termination (parser bug, replayed wire, or upstream advisory after a clean end).
+    // Behavior unchanged - we still apply the override - but the warning makes the override visible client-side, mirroring the server-side
+    // 'setDialectEnded ... (overriding)' warning in ChatGenerateTransmitter and the existing setClientAborted/setClientExcepted warnings here.
+    if (this.S.terminationReason)
+      console.warn(`[DEV] [ContentReassembler] onCGEnd: overriding prior termination '${this.S.terminationReason}' with '${terminationReason}' (wire stop: ${this.S.dialectStopReason ?? 'none'} -> ${tokenStopReason ?? 'none'})`);
+
     this.S.terminationReason = terminationReason;
     this.S.dialectStopReason = tokenStopReason;
+    // Vendor-composed stop error, surfaced as a complementary error fragment alongside the generic classification message
+    if (tokenStopError)
+      this._appendErrorFragment(tokenStopError);
   }
 
   /**
@@ -989,6 +999,11 @@ export class ContentReassembler {
   }
 
   private onCGIssue({ issueId: _issueId /* Redundant as we add an Error Fragment already */, issueText, issueHint }: Extract<AixWire_Particles.ChatGenerateOp, { cg: 'issue' }> & { issueHint?: DMessageErrorPart['hint'] }): void {
+    // Diagnostic: detect issue particles arriving after a clean termination (e.g. OpenAI rate-limit advisory after response.completed).
+    // Behavior unchanged - the issue is still appended - but the warning surfaces that we are mutating a finished message.
+    if (this.S.terminationReason && this.S.terminationReason === 'done-dialect')
+      console.warn(`[DEV] [ContentReassembler] onCGIssue: appending issue after clean '${this.S.terminationReason}' (wire stop: ${this.S.dialectStopReason ?? 'none'}): ${issueText}`);
+
     // NOTE: not sure I like the flow at all here
     // there seem to be some bad conditions when issues are raised while the active part is not text
     if (MERGE_ISSUES_INTO_TEXT_PART_IF_OPEN) {

@@ -70,7 +70,7 @@ export function aixCreateModelFromLLMOptions(
     llmVndAntEffort, llmVndGemEffort, llmVndOaiEffort, llmVndMiscEffort,
     llmVndAnt1MContext, llmVndAntInfSpeed, llmVndAntSkills, llmVndAntThinkingBudget, llmVndAntWebDynamic, llmVndAntWebFetch, llmVndAntWebFetchMaxUses, llmVndAntWebSearch, llmVndAntWebSearchMaxUses,
     llmVndBedrockAPI,
-    llmVndGeminiAspectRatio, llmVndGeminiImageSize, llmVndGeminiCodeExecution, llmVndGeminiComputerUse, llmVndGeminiGoogleSearch, llmVndGeminiMediaResolution, llmVndGeminiThinkingBudget,
+    llmVndGeminiAgentViz, llmVndGeminiAspectRatio, llmVndGeminiImageSize, llmVndGeminiCodeExecution, llmVndGeminiComputerUse, llmVndGeminiGoogleSearch, llmVndGeminiMediaResolution, llmVndGeminiThinkingBudget,
     // llmVndMoonshotWebSearch,
     llmVndOaiRestoreMarkdown, llmVndOaiVerbosity, llmVndOaiWebSearchContext, llmVndOaiWebSearchGeolocation, llmVndOaiImageGeneration, llmVndOaiCodeInterpreter,
     llmVndOrtWebSearch,
@@ -143,6 +143,7 @@ export function aixCreateModelFromLLMOptions(
 
     // Gemini
     ...(llmVndGeminiInteractions ? { vndGeminiAPI: 'interactions-agent' } : {}),
+    ...(llmVndGeminiAgentViz === 'off' ? { vndGeminiAgentViz: 'off' } : {}), // Deep Research agent_config.visualization - only forward when explicitly disabled
     ...(llmVndGeminiAspectRatio ? { vndGeminiAspectRatio: llmVndGeminiAspectRatio } : {}),
     ...(llmVndGeminiCodeExecution === 'auto' ? { vndGeminiCodeExecution: llmVndGeminiCodeExecution } : {}),
     ...(llmVndGeminiComputerUse ? { vndGeminiComputerUse: llmVndGeminiComputerUse } : {}),
@@ -342,7 +343,7 @@ export async function aixChatGenerateText_Simple(
   aixContextRef: AixAPI_Context_ChatGenerate['ref'],
   // optional options
   clientOptions?: Partial<AixClientOptions>, // this makes the abortController optional
-  // optional callback for streaming
+  // optional callback - if provided, streaming is activated
   onTextStreamUpdate?: (text: string, isDone: boolean, generator: DMessageGenerator) => MaybePromise<void>,
 ): Promise<string> {
 
@@ -363,14 +364,13 @@ export async function aixChatGenerateText_Simple(
   // Aix Context
   const aixContext = aixCreateChatGenerateContext(aixContextName, aixContextRef);
 
-  // Aix Streaming - implicit if the callback is provided
-  let aixStreaming = !!onTextStreamUpdate;
+  // Caller streaming preference - implicit: stream if a callback is provided
+  const callerStreaming = !!onTextStreamUpdate;
 
 
   // Client-side late stage model HotFixes
-  const { shallDisableStreaming } = await clientHotFixGenerateRequest_ApplyAll(llm.interfaces, aixChatGenerate, llmParameters.llmRef || llm.id);
-  if (shallDisableStreaming || aixModel.forceNoStream)
-    aixStreaming = false;
+  const { hotfixNoStream } = await clientHotFixGenerateRequest_ApplyAll(llm.interfaces, aixChatGenerate, llmParameters.llmRef || llm.id);
+  const wireStreaming = !hotfixNoStream && !aixModel.forceNoStream ? callerStreaming : false;
 
 
   // Variable to store the final text
@@ -398,11 +398,11 @@ export async function aixChatGenerateText_Simple(
     aixModel,
     aixChatGenerate,
     aixContext,
-    aixStreaming,
+    wireStreaming,
     state.generator,
     abortSignal,
     clientOptions?.throttleParallelThreads ?? 0,
-    !aixStreaming ? undefined : async (ll: AixChatGenerateContent_LL, _isDone: boolean /* we want to issue this, in case the next action is an exception */) => {
+    !onTextStreamUpdate ? undefined : async (ll: AixChatGenerateContent_LL, _isDone: boolean /* we want to issue this, in case the next action is an exception */) => {
       _llToL2Simple(ll, state);
       if (onTextStreamUpdate && state.text !== null)
         await onTextStreamUpdate(state.text, false, state.generator);
@@ -521,7 +521,7 @@ type _AixChatGenerateContent_DMessageGuts_WithOutcome = AixChatGenerateContent_D
  * @param llmId - ID of the Language Model to use
  * @param aixChatGenerate - Multi-modal chat generation request specifics, including Tools and high-level metadata
  * @param aixContext - Information about how this chat generation is being used
- * @param aixStreaming - Whether to use streaming for generation
+ * @param aixStreaming - Caller's wire-streaming preference. Subject to override by model/hotfix constraints, or dispatch constraints
  * @param clientOptions - Client options for the operation
  * @param onStreamingUpdate - Optional callback for streaming updates
  *
@@ -551,10 +551,9 @@ export async function aixChatGenerateContent_DMessage_orThrow<TServiceSettings e
     vndAntTransformInlineFiles: aixAccess.dialect === 'anthropic' ? getVndAntInlineFiles() : undefined,
   });
 
-  // Client-side late stage model HotFixes
-  const { shallDisableStreaming } = await clientHotFixGenerateRequest_ApplyAll(llm.interfaces, aixChatGenerate, llmParameters.llmRef || llm.id);
-  if (shallDisableStreaming || aixModel.forceNoStream)
-    aixStreaming = false;
+  // Client-side late stage model HotFixes - collapse the caller's requested streaming preference into the effective wire-streaming decision after constraints (hotfix gate, model.forceNoStream)
+  const { hotfixNoStream } = await clientHotFixGenerateRequest_ApplyAll(llm.interfaces, aixChatGenerate, llmParameters.llmRef || llm.id);
+  const wireStreaming = !hotfixNoStream && !aixModel.forceNoStream ? aixStreaming : false;
 
   // Legacy Note: awaited OpenAI moderation check was removed (was only on this codepath)
 
@@ -584,7 +583,7 @@ export async function aixChatGenerateContent_DMessage_orThrow<TServiceSettings e
     aixModel,
     aixChatGenerate,
     aixContext,
-    aixStreaming,
+    wireStreaming,
     dMessage.generator,
     clientOptions.abortSignal,
     clientOptions.throttleParallelThreads ?? 0,
@@ -647,21 +646,29 @@ function _finalizeLlmMetricsWithCosts(cgMetricsLg: undefined | DMetricsChatGener
 // --- L2 - Content Generation reattachment as DMessage ---
 
 /**
+ * Reattach mode selects how to reconstruct an in-progress upstream run:
+ *  - 'replay'   - canonical: SSE replays the event sequence from the start. Live deltas reach
+ *                 the UI as the run progresses (or as past content is replayed).
+ *  - 'snapshot' - one-shot JSON GET returns the resource as-is right now. Used to recover when
+ *                 the SSE endpoint is broken upstream but the resource itself is still readable.
+ *
+ * Names describe what you get, not how. See `kb/modules/LLM-gemini-interactions.md` for failure modes.
+ */
+export type AixReattachMode = 'replay' | 'snapshot';
+
+/**
  * Reattach facade: wraps `aixChatGenerateContent_DMessage_orThrow` for the reattach-to-upstream flow.
+ * - Validates the generator carries an `upstreamHandle`
+ * - Stubs the unused chat-generate request, and
+ * - Seeds the base function so the LL's reattach branch fires.
  *
- * On an in-progress upstream run (Gemini Deep Research today, extensible to OAI Responses), the server
- * just needs the handle to GET-poll; no chat-generate body is needed. This facade:
- * - validates the generator carries an `upstreamHandle`,
- * - stubs the chat-generate request (unused on the reattach path - the server uses the handle),
- * - seeds the base function via `clientOptions.reattachGenerator` so the LL's reattach branch fires.
- *
- * The reassembler starts with empty fragments; since Gemini Interactions snapshots are cumulative,
- * the stream will rebuild the complete content from scratch. Any partial content from the original run is replaced.
+ * The reassembler replaces content on reattach (Gemini Interactions snapshots are cumulative, so this rebuilds from scratch).
  */
 export async function aixReattachContent_DMessage_orThrow(
   llmId: DLLMId,
   reattachGenerator: Readonly<DMessageGenerator>,
   aixContext: AixAPI_Context_ChatGenerate,
+  mode: AixReattachMode,
   clientOptions: Pick<AixClientOptions, 'abortSignal' | 'throttleParallelThreads'>,
   onStreamingUpdate?: (update: AixChatGenerateContent_DMessageGuts, isDone: boolean) => MaybePromise<void>,
 ): Promise<_AixChatGenerateContent_DMessageGuts_WithOutcome> {
@@ -676,7 +683,7 @@ export async function aixReattachContent_DMessage_orThrow(
     llmId,
     stubChatGenerate,
     aixContext,
-    true, // streaming
+    mode === 'replay', // wire-level: SSE demuxer (replay) vs one-shot JSON body (snapshot)
     { ...clientOptions, reattachGenerator: reattachGenerator as any /* guaranteed by the check */ },
     onStreamingUpdate,
   );
@@ -753,7 +760,7 @@ export type AixChatGenerateTerminal_LL = 'completed' | 'aborted' | 'failed';
  *
  * Contract:
  * - empty fragments means no content yet, and no error
- * - aixStreaming hints the source, but can be respected or not
+ * - wireStreaming hints the wire transport (SSE vs single response), but can be respected or not by the dispatch (e.g. SSE-only APIs ignore a `false` value)
  *   - onReassemblyUpdate is optional, you can ignore the updates and await the final result
  * - errors become Error fragments, and they can be dialect-sent, dispatch-excepts, client-read issues or even user aborts
  *   - DOES NOT THROW, but the final accumulator may contain error fragments
@@ -772,7 +779,7 @@ export type AixChatGenerateTerminal_LL = 'completed' | 'aborted' | 'failed';
  *    - special parts include 'In Reference To' (a decorator of messages)
  *    - other special parts include the Anthropic Caching hints, on select message
  * @param aixContext specifies the scope of the caller, such as what's the high level objective of this call
- * @param aixStreaming requests the source to provide incremental updates
+ * @param wireStreaming the effective wire-level streaming decision (already collapsed from caller preference + model/hotfix constraints); drives tRPC `streaming` field and downstream dispatch body shape
  * @param initialGenerator generator initial value, which will be updated for every new piece of information received
  * @param abortSignal allows the caller to stop the operation
  * @param throttleParallelThreads allows the caller to limit the number of parallel threads
@@ -790,7 +797,7 @@ async function _aixChatGenerateContent_LL(
   aixModel: AixAPI_Model,
   aixChatGenerate: AixAPIChatGenerate_Request,
   aixContext: AixAPI_Context_ChatGenerate,
-  aixStreaming: boolean,
+  wireStreaming: boolean,
   // others
   initialGenerator: DMessageGenerator,
   abortSignal: AbortSignal,
@@ -804,9 +811,12 @@ async function _aixChatGenerateContent_LL(
   const inspectorTransport = !inspectorEnabled ? undefined : aixAccess.clientSideFetch ? 'csf' : 'trpc';
   const inspectorContext = !inspectorEnabled ? undefined : { contextName: aixContext.name, contextRef: aixContext.ref };
 
-  // [DEV] Inspector - request body override
+  // Inspector - override request body
   const requestBodyOverrideJson = inspectorEnabled && aixClientDebuggerGetRBO();
   const debugRequestBodyOverride = !requestBodyOverrideJson ? false : JSON.parse(requestBodyOverrideJson);
+
+  // Inspector - force disable streaming (note: dispatches may still override this)
+  if (getAixDebuggerNoStreaming()) wireStreaming = false;
 
   /**
    * FIXME: implement client selection of resumability - aixAccess option?
@@ -827,8 +837,11 @@ async function _aixChatGenerateContent_LL(
   // [CSF] Pre-load client-side executor if needed - type inference works here, no need to type
   let clientSideChatGenerate;
   let clientSideReattachUpstream;
-  if (aixAccess.clientSideFetch)
-    ({ clientSideChatGenerate, clientSideReattachUpstream } = await _loadCsfModuleOrThrow());
+  if (aixAccess.clientSideFetch) {
+    const csf = await _loadCsfModuleOrThrow();
+    clientSideChatGenerate = csf.clientSideChatGenerate;
+    clientSideReattachUpstream = csf.clientSideReattachUpstream;
+  }
 
 
   // Client-side particle transforms:
@@ -891,7 +904,7 @@ async function _aixChatGenerateContent_LL(
           aixModel,
           aixChatGenerate,
           aixContext,
-          getAixDebuggerNoStreaming() ? false : aixStreaming,
+          wireStreaming,
           aixConnectionOptions,
           abortSignal,
         ) :
@@ -901,7 +914,7 @@ async function _aixChatGenerateContent_LL(
           model: aixModel,
           chatGenerate: aixChatGenerate,
           context: aixContext,
-          streaming: getAixDebuggerNoStreaming() ? false : aixStreaming, // [DEV] disable streaming if set in the UX (testing)
+          streaming: wireStreaming,
           connectionOptions: aixConnectionOptions,
         }, { signal: abortSignal })
 
@@ -912,7 +925,7 @@ async function _aixChatGenerateContent_LL(
           aixAccess,
           accumulator_LL.generator.upstreamHandle,
           aixContext,
-          true, // streaming - reattach is only validated for streaming for now
+          wireStreaming,
           aixConnectionOptions,
           abortSignal,
         ) :
@@ -921,7 +934,7 @@ async function _aixChatGenerateContent_LL(
           access: aixAccess,
           upstreamHandle: accumulator_LL.generator.upstreamHandle,
           context: aixContext,
-          streaming: true,
+          streaming: wireStreaming,
           connectionOptions: aixConnectionOptions,
         }, { signal: abortSignal })
 

@@ -6,7 +6,7 @@ import { Release } from '~/common/app.release';
 
 import type { ModelDescriptionSchema, OrtVendorLookupResult } from '../llm.server.types';
 import { createVariantInjector, ModelVariantMap } from '../llm.server.variants';
-import { llmDevCheckModels_DEV } from '../models.mappings';
+import { formatPubDate, llmDevCheckModels_DEV } from '../models.mappings';
 
 
 // Note: these model definitions are shared across Anthropic API, OpenRouter, and AWS Bedrock.
@@ -214,12 +214,13 @@ export function llmsAntInjectVariants(acc: ModelDescriptionSchema[], model: Mode
 }
 
 
-export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: boolean })[] = [
+export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: boolean, pubDate: string /* make it required for the defs */ })[] = [
 
   // Claude 4.7 models
   {
     id: 'claude-opus-4-7', // Active - 2026-04-16
     label: 'Claude Opus 4.7',
+    pubDate: '20260416',
     description: 'Most capable generally available model for complex reasoning and agentic coding',
     contextWindow: 1_000_000, // 1M GA at standard pricing (no opt-in required)
     maxCompletionTokens: 128000,
@@ -239,6 +240,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-opus-4-6', // Active
     label: 'Claude Opus 4.6',
+    pubDate: '20260205',
     description: 'Previous most intelligent model for complex agents and coding, with adaptive thinking',
     contextWindow: 1_000_000, // 1M GA at standard pricing since 2026-03-13 (no opt-in required)
     maxCompletionTokens: 128000,
@@ -255,6 +257,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-sonnet-4-6', // Active
     label: 'Claude Sonnet 4.6',
+    pubDate: '20260217',
     description: 'Best combination of speed and intelligence for everyday tasks',
     contextWindow: 1_000_000, // 1M GA at standard pricing since 2026-03-13 (no opt-in required)
     maxCompletionTokens: 128000, // docs say 64000, API reports 128000
@@ -272,6 +275,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-opus-4-5-20251101', // Active
     label: 'Claude Opus 4.5',
+    pubDate: '20251124',
     description: 'Previous most intelligent model with advanced reasoning for complex agentic workflows',
     contextWindow: 200000,
     maxCompletionTokens: 64000,
@@ -286,6 +290,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-sonnet-4-5-20250929', // Active
     label: 'Claude Sonnet 4.5',
+    pubDate: '20250929',
     description: 'Previous best combination of speed and intelligence for complex agents and coding',
     contextWindow: 200000,
     maxCompletionTokens: 64000,
@@ -311,6 +316,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-haiku-4-5-20251001', // Active
     label: 'Claude Haiku 4.5',
+    pubDate: '20251015',
     description: 'Fastest model with exceptional speed and performance',
     contextWindow: 200000,
     maxCompletionTokens: 64000,
@@ -324,6 +330,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-opus-4-1-20250805', // Active
     label: 'Claude Opus 4.1',
+    pubDate: '20250805',
     description: 'Exceptional model for specialized complex tasks requiring advanced reasoning',
     contextWindow: 200000,
     maxCompletionTokens: 32000,
@@ -338,6 +345,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     hidden: true, // Deprecated: April 14, 2026 | Retiring: June 15, 2026 | Replacement: claude-opus-4-7
     id: 'claude-opus-4-20250514', // Deprecated
     label: 'Claude Opus 4 [Deprecated]',
+    pubDate: '20250522',
     description: 'Previous flagship model. Deprecated April 14, 2026, retiring June 15, 2026.',
     contextWindow: 200000,
     maxCompletionTokens: 32000,
@@ -351,6 +359,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     hidden: true, // Deprecated: April 14, 2026 | Retiring: June 15, 2026 | Replacement: claude-sonnet-4-6
     id: 'claude-sonnet-4-20250514', // Deprecated
     label: 'Claude Sonnet 4 [Deprecated]',
+    pubDate: '20250522',
     description: 'High-performance model. Deprecated April 14, 2026, retiring June 15, 2026.',
     contextWindow: 200000,
     maxCompletionTokens: 64000,
@@ -379,6 +388,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-3-7-sonnet-20250219', // Retired | Deprecated: October 28, 2025 | Retired: February 19, 2026 | Replacement: claude-opus-4-6
     label: 'Claude Sonnet 3.7 [Retired]',
+    pubDate: '20250224',
     description: 'High-performance model with early extended thinking. Retired February 19, 2026.',
     contextWindow: 200000,
     maxCompletionTokens: 64000,
@@ -396,6 +406,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
   {
     id: 'claude-3-5-haiku-20241022', // Retired | Deprecated: December 19, 2025 | Retired: February 19, 2026
     label: 'Claude Haiku 3.5 [Retired]',
+    pubDate: '20241104',
     description: 'Intelligence at blazing speeds. Retired February 19, 2026.',
     contextWindow: 200000,
     maxCompletionTokens: 8192,
@@ -413,6 +424,7 @@ export const hardcodedAnthropicModels: (ModelDescriptionSchema & { isLegacy?: bo
     hidden: true, // deprecated
     id: 'claude-3-haiku-20240307', // Deprecated | Deprecated: February 19, 2026 | Retiring: April 20, 2026 | Replacement: claude-haiku-4-5-20251001
     label: 'Claude Haiku 3 [Deprecated]',
+    pubDate: '20240313',
     description: 'Fast and compact model for near-instant responsiveness. Deprecated February 19, 2026, retiring April 20, 2026.',
     contextWindow: 200000,
     maxCompletionTokens: 4096,
@@ -595,11 +607,13 @@ export function llmsAntCreatePlaceholderModel(model: AnthropicWire_API_Models_Li
   parameterSpecs.push(...ANT_TOOLS);
 
   const maxInputTokens = model.max_input_tokens;
+  const createdAt = model.created_at ? new Date(model.created_at) : undefined;
   return {
     id: model.id,
     idVariant: '::placeholder',
     label: model.display_name,
-    created: Math.round(new Date(model.created_at).getTime() / 1000),
+    created: createdAt ? Math.round(createdAt.getTime() / 1000) : undefined,
+    pubDate: formatPubDate(createdAt), // 0-day: use Anthropic API's created_at, or today if unset
     description: 'Newest model, description not available yet.',
     contextWindow: maxInputTokens ?? 200_000, // report API value as-is (no cap for unknown models)
     maxCompletionTokens: model.max_tokens || 32768,
@@ -755,5 +769,5 @@ export function llmOrtAntLookup_ThinkingVariants(orModelName: string): OrtVendor
     .map((spec) => ({ ...spec }));
 
   // initialTemperature: not set - Anthropic models use the global fallback (0.5)
-  return { interfaces, parameterSpecs };
+  return { pubDate: model.pubDate, interfaces, parameterSpecs };
 }

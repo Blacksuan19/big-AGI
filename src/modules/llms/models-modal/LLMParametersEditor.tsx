@@ -51,6 +51,7 @@ const _oaiEffortOptions = [
 ] as const;
 
 const _miscEffortOptions = [
+  { value: 'max', label: 'Max', description: 'Hardest thinking' } as const,
   { value: 'high', label: 'On', description: 'Multi-step reasoning' } as const,
   { value: 'none', label: 'Off', description: 'Disable thinking mode' } as const,
   { value: _UNSPECIFIED, label: 'Default', description: 'Model Default' } as const,
@@ -120,6 +121,11 @@ const _geminiGoogleSearchOptions = [
   { value: '1y', label: 'Last Year', description: 'Results since last year' },
   // { value: '6m', label: 'Last 6 Months', description: 'Results from last 6 months' },
   { value: _UNSPECIFIED, label: 'Off', description: 'Default (disabled)' },
+] as const;
+
+const _geminiAgentVizOptions = [
+  { value: _UNSPECIFIED, label: 'Auto', description: 'Default - agent may include charts/images' },
+  { value: 'off', label: 'Off', description: 'Text only (better when merging multiple reports)' },
 ] as const;
 
 const _geminiMediaResolutionOptions = [
@@ -244,6 +250,7 @@ export function LLMParametersEditor(props: {
     llmVndAntWebSearch,
     llmVndAntWebSearchMaxUses,
     llmVndGemEffort,
+    llmVndGeminiAgentViz,
     llmVndGeminiAspectRatio,
     llmVndGeminiCodeExecution,
     llmVndGeminiGoogleSearch,
@@ -683,6 +690,19 @@ export function LLMParametersEditor(props: {
           else onChangeParameter({ llmVndGeminiMediaResolution: value });
         }}
         options={_geminiMediaResolutionOptions}
+      />
+    )}
+
+    {showParam('llmVndGeminiAgentViz') && (
+      <FormSelectControl
+        title='Visualizations'
+        tooltip='Charts and images in Deep Research reports. Disable for text-only output (helpful when merging multiple reports).'
+        value={llmVndGeminiAgentViz ?? _UNSPECIFIED}
+        onChange={(value) => {
+          if (value === _UNSPECIFIED || !value) onRemoveParameter('llmVndGeminiAgentViz');
+          else onChangeParameter({ llmVndGeminiAgentViz: value });
+        }}
+        options={_geminiAgentVizOptions}
       />
     )}
 

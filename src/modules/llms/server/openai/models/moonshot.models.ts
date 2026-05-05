@@ -28,7 +28,8 @@ const _PS_Reasoning: ModelDescriptionSchema['parameterSpecs'] = [
  * Moonshot AI (Kimi) models.
  * - models list and pricing: https://platform.kimi.ai/docs/pricing/chat (was platform.moonshot.ai - now 301 redirect)
  * - API docs: https://platform.kimi.ai/docs/api/chat
- * - updated: 2026-04-20
+ * - updated: 2026-05-04
+ * - NOTE: K2 series (non-2.5/2.6) is scheduled for discontinuation on 2026-05-25 per Moonshot docs.
  */
 const _knownMoonshotModels: ManualMappings = [
 
@@ -36,6 +37,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'kimi-k2.6',
     label: 'Kimi K2.6',
+    pubDate: '20260420',
     description: 'Native multimodal flagship (text, image, video inputs) with thinking and non-thinking modes. Stronger long-form coding, improved instruction compliance and self-correction. 256K context.',
     contextWindow: 262144,
     maxCompletionTokens: 32768,
@@ -49,6 +51,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'kimi-k2.5',
     label: 'Kimi K2.5',
+    pubDate: '20260127',
     description: 'Supports vision (images/videos), thinking mode, and Agent tasks. 256K context.',
     contextWindow: 262144,
     maxCompletionTokens: 32768,
@@ -58,12 +61,13 @@ const _knownMoonshotModels: ManualMappings = [
     benchmark: { cbaElo: 1451 }, // kimi-k2.5-thinking
   },
 
-  // Kimi K2 Series - Latest Models
+  // Kimi K2 Series - scheduled for discontinuation on 2026-05-25
 
   // Fast, Thinking
   {
     idPrefix: 'kimi-k2-thinking-turbo',
     label: 'Kimi K2 Thinking Turbo',
+    pubDate: '20251106',
     description: 'High-speed reasoning model with advanced thinking and tool calling capabilities. Faster inference (~50 tok/s) with optimized performance. 256K context. Temperature 1.0 recommended.',
     contextWindow: 262144,
     maxCompletionTokens: 65536,
@@ -76,6 +80,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'kimi-k2-thinking',
     label: 'Kimi K2 Thinking',
+    pubDate: '20251106',
     description: 'Advanced reasoning model with multi-step thinking and autonomous tool calling (200-300 sequential calls). Interleaves chain-of-thought with tool use. 256K context. Temperature 1.0 recommended.',
     contextWindow: 262144,
     maxCompletionTokens: 65536,
@@ -89,6 +94,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'kimi-k2-0905-preview',
     label: 'Kimi K2 0905 (Preview)',
+    pubDate: '20250905',
     description: 'State-of-the-art MoE model (1T total, 32B active) with extended 256K context. Enhanced agentic coding intelligence and improved instruction following.',
     contextWindow: 262144,
     maxCompletionTokens: 32768,
@@ -102,6 +108,7 @@ const _knownMoonshotModels: ManualMappings = [
     hidden: true,
     idPrefix: 'kimi-k2-0711-preview',
     label: 'Kimi K2 0711 (Preview)',
+    pubDate: '20250711',
     description: 'Earlier preview variant with 128K context. Superseded by 0905 version.',
     contextWindow: 131072,
     maxCompletionTokens: 16384,
@@ -114,6 +121,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'kimi-k2-turbo-preview',
     label: 'Kimi K2 Turbo (Preview)',
+    pubDate: '20250801',
     description: 'High-speed variant with 60-100 tokens/second output. 256K context. Optimized for real-time applications and agentic tasks.',
     contextWindow: 262144,
     maxCompletionTokens: 32768,
@@ -127,6 +135,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'moonshot-v1-128k',
     label: 'V1 128K',
+    pubDate: '20240206',
     description: 'Legacy V1 model with 128K context. Deprecated - use Kimi K2 Instruct instead.',
     contextWindow: 131072,
     interfaces: [LLM_IF_OAI_Chat, LLM_IF_OAI_Fn],
@@ -136,6 +145,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'moonshot-v1-32k',
     label: 'V1 32K',
+    pubDate: '20240206',
     description: 'Legacy V1 model with 32K context. Deprecated - use Kimi K2 Instruct instead.',
     contextWindow: 32768,
     interfaces: [LLM_IF_OAI_Chat, LLM_IF_OAI_Fn],
@@ -145,6 +155,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'moonshot-v1-8k',
     label: 'V1 8K',
+    pubDate: '20240206',
     description: 'Legacy V1 model with 8K context. Deprecated - use Kimi K2 Instruct instead.',
     contextWindow: 8192,
     interfaces: [LLM_IF_OAI_Chat, LLM_IF_OAI_Fn],
@@ -157,6 +168,7 @@ const _knownMoonshotModels: ManualMappings = [
     // hidden: false, not hidden - only non-hidden vision for now
     idPrefix: 'moonshot-v1-128k-vision-preview',
     label: 'V1 128K Vision (Preview)',
+    pubDate: '20250115',
     description: 'Legacy vision model with 128K context. Preview variant - use moonshot-v1-vision for production.',
     contextWindow: 131072,
     interfaces: [LLM_IF_OAI_Chat, LLM_IF_OAI_Vision],
@@ -166,6 +178,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'moonshot-v1-32k-vision-preview',
     label: 'V1 32K Vision (Preview)',
+    pubDate: '20250115',
     description: 'Legacy vision model with 32K context. Preview variant - use moonshot-v1-vision for production.',
     contextWindow: 32768,
     interfaces: [LLM_IF_OAI_Chat, LLM_IF_OAI_Vision],
@@ -176,6 +189,7 @@ const _knownMoonshotModels: ManualMappings = [
   {
     idPrefix: 'moonshot-v1-8k-vision-preview',
     label: 'V1 8K Vision (Preview)',
+    pubDate: '20250115',
     description: 'Legacy vision model with 8K context. Preview variant - use moonshot-v1-vision for production.',
     contextWindow: 8192,
     interfaces: [LLM_IF_OAI_Chat, LLM_IF_OAI_Vision],

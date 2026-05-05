@@ -23,7 +23,11 @@ export namespace GeminiInteractionsWire_API_Interactions {
 
   export const getPath = (id: string) => `/v1beta/interactions/${encodeURIComponent(id)}`;
 
+  // DELETE. Removes the stored record. Orthogonal to cancel; when removed the original connection may still be running and streaming
   export const deletePath = (id: string) => `/v1beta/interactions/${encodeURIComponent(id)}`;
+
+  // POST. Only cancels background interactions that are still running
+  export const cancelPath = (id: string) => `/v1beta/interactions/${encodeURIComponent(id)}/cancel`;
 
 
   // -- Request Body (POST /v1beta/interactions) --
@@ -163,7 +167,7 @@ export namespace GeminiInteractionsWire_API_Interactions {
     // the parser prefers inline and falls back to a URI note when only `uri` is present.
     data: z.string().optional(), // base64-encoded bytes
     uri: z.string().optional(),
-    mime_type: z.string(),
+    mime_type: z.string().optional(), // spec: optional - parser still requires it before emitting inline
     resolution: z.string().optional(), // 'low' | 'medium' | 'high' | 'ultra_high'
   });
 
@@ -172,7 +176,7 @@ export namespace GeminiInteractionsWire_API_Interactions {
     // Per docs: data or uri, mime_type covers both PCM (audio/l16) and packaged formats (audio/wav, audio/mp3, ...).
     data: z.string().optional(),
     uri: z.string().optional(),
-    mime_type: z.string(),
+    mime_type: z.string().optional(), // spec: optional - parser still requires it before emitting inline
     rate: z.number().optional(), // sample rate, when known
     channels: z.number().optional(),
   });

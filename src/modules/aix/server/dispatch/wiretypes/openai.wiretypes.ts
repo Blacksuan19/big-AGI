@@ -189,6 +189,13 @@ export namespace OpenAIWire_Messages {
     /** [OpenRouter, 2025-01-20] Reasoning traces with multiple blocks (summary, text, encrypted). */
     reasoning_details: z.array(OpenAIWire_ContentParts.OpenRouter_ReasoningDetail_schema).optional(),
 
+    /**
+     * [DeepSeek, 2026-04-24] Chain-of-thought reasoning text.
+     * - Response: emitted by V4 thinking-by-default; parsed into a 'ma' reasoning part.
+     * - (this) Request: MUST be echoed back on assistant turns that carry tool_calls (otherwise HTTP 400: "The reasoning_content in the thinking mode must be passed back to the API.").
+     */
+    reasoning_content: z.string().nullable().optional(),
+
     // function_call: // ignored, as it's deprecated
     // name: _optionalParticipantName, // omitted by choice: generally unsupported
   });
@@ -331,7 +338,7 @@ export namespace OpenAIWire_API_Chat_Completions {
     stream_options: z.object({
       include_usage: z.boolean().optional(), // If set, an additional chunk will be streamed with a 'usage' field on the entire request.
     }).optional(),
-    reasoning_effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(), // [OpenAI, 2024-12-17] [Perplexity, 2025-06-23] reasoning effort
+    reasoning_effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(), // [OpenAI, 2024-12-17] [Perplexity, 2025-06-23] reasoning effort; [DeepSeek, 2026-04-23] 'max' added for V4
     // OpenAI and [OpenRouter, 2025-01-20] Verbosity parameter - maps to output_config.effort for Anthropic models
     // https://openrouter.ai/docs/api/reference/parameters#verbosity
     verbosity: z.enum([
@@ -342,7 +349,7 @@ export namespace OpenAIWire_API_Chat_Completions {
     // [OpenRouter, 2025-11-11] Unified reasoning parameter for all models
     reasoning: z.object({
       max_tokens: z.int().optional(), // Token-based control (Anthropic, Gemini): 1024-32000
-      effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(), // Effort-based control (OpenAI o1/o3/GPT-5, xAI, DeepSeek): allocates % of max_tokens
+      effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(), // Effort-based control (OpenAI o1/o3/GPT-5, xAI, DeepSeek): allocates % of max_tokens
       enabled: z.boolean().optional(), // Simple enable with medium effort defaults
       exclude: z.boolean().optional(), // Use reasoning internally without returning it in response
     }).optional(),
@@ -447,6 +454,8 @@ export namespace OpenAIWire_API_Chat_Completions {
     search_after_date_filter: z.string().optional(), // Date filter in MM/DD/YYYY format
 
     // [Moonshot, 2026-01-26] Kimi K2.5 thinking mode control
+    // [Z.ai, 2025-xx] GLM thinking mode: type 'enabled' | 'disabled'
+    // [DeepSeek, 2026-04-23] V4 thinking mode: same binary shape; depth is controlled via top-level `reasoning_effort`
     thinking: z.object({
       type: z.enum(['enabled', 'disabled']),
     }).optional(),
@@ -1174,9 +1183,11 @@ export namespace OpenAIWire_Responses_Items {
         // [OpenAI 2026-03-xx] DEPRECATED query might not always be present in done event
         query: z.string().optional(),
         // the output websites, if any [{"type":"url","url":"https://www.enricoros.com/"}, {"type":"url","url": "https://linkedin.com/in/enricoros/"}, ...]
+        // [OpenAI 2026-04-23, GPT-5.5] new source types: { type: 'api', name: 'oai-calculator' } for hosted-tool invocations (no url)
         sources: z.array(z.object({
-          type: z.literal('url').optional(), // source type
-          url: z.string(),
+          type: z.enum(['url', 'api']).or(z.string()).optional(), // 'url' (default) | 'api' (GPT-5.5 hosted tools) | future types
+          url: z.string().nullish(), // optional: 'api' sources have no url, only name
+          name: z.string().nullish(), // for 'api' sources (e.g., 'oai-calculator')
           // [OpenAI 2026-03-xx] not present anymore
           // title: z.string().optional(),
           // snippet: z.string().optional(),
@@ -1437,6 +1448,7 @@ export namespace OpenAIWire_Responses_Tools {
   const WebSearchTool_schema = z.object({
     type: z.enum(['web_search', 'web_search_preview', 'web_search_preview_2025_03_11']),
     search_context_size: z.enum(['low', 'medium', 'high']).optional(),
+    // [OpenAI 2026-04-23, GPT-5.5] API echoes user_location as `null` (not undefined) when unset - so .nullish()
     user_location: z.object({
       type: z.literal('approximate'),
       // API echoes these as `null` when unset, not omitted - so .nullish()
@@ -1444,7 +1456,7 @@ export namespace OpenAIWire_Responses_Tools {
       country: z.string().nullish(),
       region: z.string().nullish(),
       timezone: z.string().nullish(),
-    }).optional(),
+    }).nullish(),
     external_web_access: z.boolean().optional(),
   });
 
@@ -1641,7 +1653,7 @@ export namespace OpenAIWire_API_Responses {
     // NOTE: .catch() gracefully degrades to undefined since this is a non-critical enrichment path
     tools: z.array(OpenAIWire_Responses_Tools.Tool_schema).optional().catch((ctx) => {
       console.warn('[DEV] AIX: OpenAI Responses: unable to parse echoed tools, ignoring:', { tools: ctx.value });
-      return;
+      return undefined;
     }),
 
     output: z.array(OpenAIWire_Responses_Items.OutputItem_schema),

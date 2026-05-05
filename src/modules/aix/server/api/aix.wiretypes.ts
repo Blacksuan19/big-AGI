@@ -104,9 +104,18 @@ export namespace AixWire_Parts {
       openai: z.object({
         // Responses API reasoning item continuity handle. Sub-object mirrors the shape of the source output item
         // and parallels _vnd Anthropic's { container: { id, expiresAt } } pattern.
+        // IMPORTANT: this blob is OpenAI-server-encrypted; do NOT round-trip to xAI (different keys + private item ids).
         reasoningItem: z.object({
           id: z.string().optional(),               // rs_... - item id
           encryptedContent: z.string().optional(), // blob returned when include:['reasoning.encrypted_content']
+        }).optional(),
+      }).optional(),
+      xai: z.object({
+        // xAI Responses API reasoning item continuity handle. Same WIRE shape as OpenAI's, but the encrypted_content
+        // is encrypted with xAI's keys and the item id references xAI server state - NOT cross-portable to OpenAI.
+        reasoningItem: z.object({
+          id: z.string().optional(),
+          encryptedContent: z.string().optional(),
         }).optional(),
       }).optional(),
       // NOTE: we do NOT use this mechanism for per-vendor customization/ALT for parts
@@ -507,6 +516,7 @@ export namespace AixWire_API {
 
     // Gemini
     vndGeminiAPI: z.enum(['interactions-agent']).optional(), // opt-in per-model API dialect; unset = generateContent
+    vndGeminiAgentViz: z.enum(['auto', 'off']).optional(), // agent_config.visualization; default 'auto' upstream
     vndGeminiAspectRatio: z.enum(['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9']).optional(),
     vndGeminiCodeExecution: z.enum(['auto']).optional(),
     vndGeminiComputerUse: z.enum(['browser']).optional(),
@@ -689,7 +699,7 @@ export namespace AixWire_Particles {
 
   export type ChatControlOp =
   // | { cg: 'start' } // not really used for now
-    | { cg: 'end', terminationReason: CGEndReason /* we know why we're sending 'end' */, tokenStopReason?: GCTokenStopReason /* we may or not have gotten a logical token stop reason from the dispatch */ }
+    | { cg: 'end', terminationReason: CGEndReason /* we know why we're sending 'end' */, tokenStopReason?: GCTokenStopReason /* we may or not have gotten a logical token stop reason from the dispatch */, tokenStopError?: string /* optional vendor-composed human-readable detail paired with tokenStopReason */ }
     | { cg: 'issue', issueId: CGIssueId, issueText: string }
     | { cg: 'aix-info', ait: 'flow-cont' /* important: establishes a checkpoint */, text: string }
     | { cg: 'aix-retry-reset', rScope: 'srv-dispatch' | 'srv-op' | 'cli-ll', rClearStrategy: 'none' | 'since-checkpoint' | 'all', reason: string, attempt: number, maxAttempts: number, delayMs: number, causeHttp?: number, causeConn?: string }
@@ -786,6 +796,7 @@ export namespace AixWire_Particles {
       | { vendor: 'anthropic', state: { container: { id: string; expiresAt: string } } } // message-level
       | { vendor: 'gemini', state: { thoughtSignature: string } } // fragment-level
       | { vendor: 'openai', state: { reasoningItem: { id?: string, encryptedContent?: string } } } // fragment-level (attach to ma reasoning fragment)
+      | { vendor: 'xai', state: { reasoningItem: { id?: string, encryptedContent?: string } } } // fragment-level - DISTINCT from openai (different encryption keys, different server-side ids)
       // | { vendor: string, state: Record<string, unknown> } // disable catch-all becasue it forces casts in type discriminations
       )
     ;

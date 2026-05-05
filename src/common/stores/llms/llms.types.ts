@@ -25,6 +25,7 @@ export interface DLLM {
   label: string;
   created: number | 0;
   updated?: number | 0;
+  pubDate?: string; // official release date in 'YYYYMMDD'
   description: string;
   hidden: boolean;
 
@@ -135,6 +136,20 @@ export function getLLMMaxOutputTokens(llm: DLLM | null): DLLMMaxOutputTokens | u
 
   // Check user override first, then fall back to model default
   return llm.userMaxOutputTokens ?? llm.maxOutputTokens;
+}
+
+/**
+ * Parse the model's editorial `pubDate` ('YYYYMMDD') into a Date, or null if missing/malformed.
+ * Date is constructed at local midnight - pubDate is day-precision, no time component.
+ */
+export function getLLMPubDate(llm: DLLM | null | undefined): Date | null {
+  const p = llm?.pubDate;
+  if (!p || !/^\d{8}$/.test(p)) return null;
+  const y = parseInt(p.slice(0, 4), 10);
+  const m = parseInt(p.slice(4, 6), 10) - 1; // JS Date months are 0-indexed
+  const d = parseInt(p.slice(6, 8), 10);
+  const date = new Date(y, m, d);
+  return Number.isFinite(date.getTime()) ? date : null;
 }
 
 /// Interfaces ///

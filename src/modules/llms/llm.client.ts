@@ -107,6 +107,7 @@ function _createDLLMFromModelDescription(d: ModelDescriptionSchema, service: DMo
     label: d.label,
     created: d.created || 0,
     updated: d.updated || 0,
+    ...(d.pubDate && { pubDate: d.pubDate }),
     description: d.description,
     hidden: !!d.hidden,
 

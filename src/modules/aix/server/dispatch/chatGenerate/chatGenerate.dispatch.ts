@@ -25,7 +25,7 @@ import { createAnthropicFileInlineTransform } from './parsers/anthropic.transfor
 import { createAnthropicMessageParser, createAnthropicMessageParserNS } from './parsers/anthropic.parser';
 import { createBedrockConverseParserNS, createBedrockConverseStreamParser } from './parsers/bedrock-converse.parser';
 import { createGeminiGenerateContentResponseParser } from './parsers/gemini.parser';
-import { createGeminiInteractionsParser } from './parsers/gemini.interactions.parser';
+import { createGeminiInteractionsParserNS, createGeminiInteractionsParserSSE } from './parsers/gemini.interactions.parser';
 import { createOpenAIChatCompletionsChunkParser, createOpenAIChatCompletionsParserNS } from './parsers/openai.parser';
 import { createOpenAIResponseParserNS, createOpenAIResponsesEventParser } from './parsers/openai.responses.parser';
 
@@ -37,7 +37,8 @@ export type ChatGenerateDispatch = {
   /** Used by dialects that need multi-step I/O. The returned response is consumed normally via demuxerFormat/chatGenerateParse */
   customConnect?: (signal: AbortSignal) => Promise<Response>;
   bodyTransform?: AixDemuxers.StreamBodyTransform;
-  demuxerFormat: AixDemuxers.StreamDemuxerFormat;
+  /** Source of truth for the consumer mode: null = NS */
+  demuxerFormat: null | AixDemuxers.StreamDemuxerFormat;
   chatGenerateParse: ChatGenerateParseFunction;
   particleTransform?: ChatGenerateParticleTransformFunction;
 };
@@ -173,6 +174,7 @@ export async function createChatGenerateDispatch(access: AixAPI_Access, model: A
 
       // [Gemini Interactions API - ALPHA TEST] SSE-native: POST with stream=true, upstream returns event-stream we pipe through the fast-sse demuxer.
       if (model.vndGeminiAPI === 'interactions-agent') {
+        if (!streaming) console.warn(`[DEV] Gemini Interactions API - only supported in SSE mode, ignoring streaming=false for model ${model.id}`);
         const request: ChatGenerateDispatchRequest = {
           ...geminiAccess(access, null, GeminiInteractionsWire_API_Interactions.postPath, false),
           method: 'POST',
@@ -186,8 +188,9 @@ export async function createChatGenerateDispatch(access: AixAPI_Access, model: A
               if (signal.aborted) throw error; // preserve abort identity for the executor's abort classifier
               throw new Error(`Gemini Interactions POST: ${error?.message || 'upstream error'}`); // rewrapping TRPCFetcherError as plain Error makes the retrier treat it as non-retryable
             }),
+          /** Upstream hardcodes stream=true + background=true (required by deep-research agents) and has no non-streaming alternative. */
           demuxerFormat: 'fast-sse',
-          chatGenerateParse: createGeminiInteractionsParser(requestedModelName),
+          chatGenerateParse: createGeminiInteractionsParserSSE(requestedModelName),
         };
       }
 
@@ -244,9 +247,9 @@ export async function createChatGenerateDispatch(access: AixAPI_Access, model: A
     case 'zai':
 
       // newer: OpenAI Responses API, for models that support it and all XAI models
-      const isResponsesAPI = !!model.vndOaiResponsesAPI;
       const isXAIModel = dialect === 'xai'; // All XAI models are accessed via Responses now
-      if (isResponsesAPI || isXAIModel) {
+      const isResponsesAPI = !!model.vndOaiResponsesAPI || isXAIModel;
+      if (isResponsesAPI) {
         return {
           request: {
             ...openAIAccess(access, model.id, OPENAI_API_PATHS.responses),
@@ -261,11 +264,17 @@ export async function createChatGenerateDispatch(access: AixAPI_Access, model: A
              *
              * Note: Response format is compatible with OpenAI parser.
              */
-            body: isXAIModel ? aixToXAIResponses(model, chatGenerate, streaming, enableResumability)
+            body: isXAIModel
+              ? aixToXAIResponses(model, chatGenerate, streaming, enableResumability)
               : aixToOpenAIResponses(dialect, model, chatGenerate, streaming, enableResumability),
           },
           demuxerFormat: streaming ? 'fast-sse' : null,
-          chatGenerateParse: streaming ? createOpenAIResponsesEventParser() : createOpenAIResponseParserNS(),
+          // IMPORTANT: tag the parser with the actual vendor so reasoning continuity blobs
+          // (encrypted_content + rs_... id) land in the matching _vnd namespace and never leak
+          // across providers (different keys + different server-side state).
+          chatGenerateParse: streaming
+            ? createOpenAIResponsesEventParser(isXAIModel ? 'xai' : 'openai')
+            : createOpenAIResponseParserNS(isXAIModel ? 'xai' : 'openai'),
         };
       }
 
@@ -316,18 +325,20 @@ export async function createChatGenerateResumeDispatch(access: AixAPI_Access, re
       return {
         request: { url: `${url}?${queryParams.toString()}`, method: 'GET', headers },
         demuxerFormat: streaming ? 'fast-sse' : null,
-        chatGenerateParse: streaming ? createOpenAIResponsesEventParser() : createOpenAIResponseParserNS(),
+        chatGenerateParse: streaming ? createOpenAIResponsesEventParser('openai') : createOpenAIResponseParserNS('openai'),
       };
 
     case 'gemini': {
-      // [Gemini Interactions] Reattach via SSE stream - GET /interactions/{id}?stream=true replays all events from the start (intentional - client's ContentReassembler replaces message content on reattach; partial resume via last_event_id is deliberately NOT used).
+      // [Gemini Interactions] Reattach: SSE replay (?stream=true) or JSON snapshot (no query). See kb/modules/LLM-gemini-interactions.md.
       if (resumeHandle.uht !== 'vnd.gem.interactions')
         throw new Error(`Resume handle mismatch for gemini: expected 'vnd.gem.interactions', got '${resumeHandle.uht}'`);
       const { url: _baseUrl, headers: _headers } = geminiAccess(access, null, GeminiInteractionsWire_API_Interactions.getPath(resumeHandle.runId /* Gemini interaction.id */), false);
       return {
-        request: { url: `${_baseUrl}${_baseUrl.includes('?') ? '&' : '?'}stream=true`, method: 'GET', headers: _headers },
-        demuxerFormat: 'fast-sse',
-        chatGenerateParse: createGeminiInteractionsParser(null /* model name unknown at resume time - caller's DMessage already has it */),
+        request: { url: streaming ? `${_baseUrl}${_baseUrl.includes('?') ? '&' : '?'}stream=true` : _baseUrl, method: 'GET', headers: _headers },
+        demuxerFormat: streaming ? 'fast-sse' : null,
+        chatGenerateParse: streaming
+          ? createGeminiInteractionsParserSSE(null /* model name unknown at resume time - caller's DMessage already has it */)
+          : createGeminiInteractionsParserNS(null),
       };
     }
 
@@ -393,6 +404,21 @@ export async function executeChatGenerateDelete(access: AixAPI_Access, handle: A
     case 'gemini':
       if (handle.uht !== 'vnd.gem.interactions')
         throw new Error(`Delete handle mismatch for gemini: expected 'vnd.gem.interactions', got '${handle.uht}'`);
+
+      // Gemini: cancel the background run first (stops token generation), then DELETE the stored record.
+      // The DELETE endpoint only removes the resource; it does NOT cancel an in-flight run.
+      // Cancel may 404 "Method not found" on the Developer API (API-key mode, googleapis/python-genai#1971) -
+      // we log the outcome and proceed to DELETE so local cleanup still happens.
+      const { url: cancelUrl, headers: cancelHeaders } = geminiAccess(access, null, GeminiInteractionsWire_API_Interactions.cancelPath(handle.runId), false);
+      try {
+        const cancelResp = await fetchResponseOrTRPCThrow({ url: cancelUrl, method: 'POST', body: {}, headers: cancelHeaders, signal: abortSignal, name: 'Aix.Gemini.Interactions.cancel', throwWithoutName: true });
+        console.log(`[AIX] Gemini.Interactions.cancel: ok=${cancelResp.ok} status=${cancelResp.status}`);
+      } catch (error: any) {
+        if (abortSignal.aborted) throw error;
+        const status = error instanceof TRPCFetcherError ? error.httpStatus : undefined;
+        console.log(`[AIX] Gemini.Interactions.cancel: failed status=${status ?? '?'} msg=${error?.message ?? 'unknown'}`);
+      }
+
       ({ url, headers } = geminiAccess(access, null, GeminiInteractionsWire_API_Interactions.deletePath(handle.runId), false));
       name = 'Aix.Gemini.Interactions.delete';
       break;
