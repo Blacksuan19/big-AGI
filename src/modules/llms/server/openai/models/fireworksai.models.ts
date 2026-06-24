@@ -4,7 +4,10 @@ import { serverCapitalizeFirstLetter } from '~/server/wire';
 
 import type { ModelDescriptionSchema } from '../../llm.server.types';
 
-import { fromManualMapping, ManualMappings } from '../../models.mappings';
+import { formatPubDate, fromManualMapping, llmsDefineManualMappings } from '../../models.mappings';
+
+// --- FireworksAI Model ID inference (auto-derived from _fireworksKnownModels) ---
+export type LlmsFireworksAIModelId = typeof _fireworksKnownModels[number]['idPrefix'];
 import { wireFireworksAIListOutputSchema } from '../wiretypes/fireworksai.wiretypes';
 
 
@@ -13,9 +16,9 @@ export function fireworksAIHeuristic(hostname: string) {
 }
 
 
-const _fireworksKnownModels: ManualMappings = [
+const _fireworksKnownModels = llmsDefineManualMappings([
   // NOTE: we don't need manual patching as we have enough info for now
-] as const;
+]);
 
 const _fireworksDenyListContains: string[] = [
   // nothing to deny for now
@@ -66,7 +69,7 @@ export function fireworksAIModelsToModelDescriptions(wireModels: unknown): Model
       if (model.supports_tools)
         interfaces.push(LLM_IF_OAI_Fn);
 
-      return fromManualMapping(_fireworksKnownModels, model.id, model.created, undefined, {
+      const md = fromManualMapping(_fireworksKnownModels, model.id, model.created, undefined, {
         idPrefix: model.id,
         label,
         description,
@@ -78,6 +81,14 @@ export function fireworksAIModelsToModelDescriptions(wireModels: unknown): Model
         // chatPrice,
         hidden: false,
       });
+
+      // pubDate fallback: Fireworks' 'created' is verified real per-model release/index dates (unique,
+      // 2024-2026 spread, not a constant), so derive a day-precision pubDate to drive the "new" badge for
+      // models without an editorial pubDate. An editorial pubDate (from _fireworksKnownModels) always wins.
+      if (md.pubDate === undefined && md.created)
+        md.pubDate = formatPubDate(md.created);
+
+      return md;
     })
 
     .sort((a: ModelDescriptionSchema, b: ModelDescriptionSchema): number => {

@@ -6,7 +6,7 @@ import type { IParticleTransmitter } from './IParticleTransmitter';
 import { IssueSymbols } from '../ChatGenerateTransmitter';
 import { aixResilientUnknownValue } from '../../../api/aix.resilience';
 
-import { AnthropicWire_API_Message_Create } from '../../wiretypes/anthropic.wiretypes';
+import { AnthropicWire_API_Message_Create, AnthropicWire_Messages } from '../../wiretypes/anthropic.wiretypes';
 import { DispatchContinuationSignal } from '../chatGenerate.continuation';
 import { OperationRetrySignal } from '../chatGenerate.operation-retry';
 
@@ -174,6 +174,13 @@ export function createAnthropicMessageParser(): ChatGenerateParseFunction {
             throw new Error(`Unexpected content block start location (${requestedIndex})`);
         responseMessage.content[index] = contentBlock;
 
+        // [2026-06-09] Forward-compat: unknown/future block types ('fallback', 'compaction', 'advisor_tool_result', ...) are
+        // stored above (index integrity + pause_turn echo) but not processed - deltas/stop for this index are ignored too
+        if (!AnthropicWire_Messages.isKnownContentBlockOutput(contentBlock)) {
+          aixResilientUnknownValue('Anthropic', 'contentBlockType', contentBlock.type);
+          break;
+        }
+
         if (ANTHROPIC_DEBUG_EVENT_SEQUENCE) {
           const debugInfo = contentBlock.type === 'tool_use' ? `tool=${contentBlock.name}`
             : contentBlock.type === 'server_tool_use' ? `server_tool=${contentBlock.name}`
@@ -205,9 +212,13 @@ export function createAnthropicMessageParser(): ChatGenerateParseFunction {
             break;
 
           case 'tool_use':
-            // [Anthropic] Note: .input={} is parsed as an object - zap to '' for later string concatenation via input_json_delta
-            if (contentBlock && contentBlock.input && typeof contentBlock.input === 'object' && Object.keys(contentBlock.input).length === 0)
-              contentBlock.input = '';
+            // [Anthropic] .input arrives as an object: {} when the args will stream via input_json_delta,
+            // or PRE-POPULATED when the call was made programmatically from code execution (PTC) - the
+            // sandbox computed the args, so the block starts complete. Normalize both to the incremental
+            // string representation. (2026-06-13: a PTC client-tool call used to kill the stream here
+            // with "unexpected argument format: got 'object' instead of 'incr_str'")
+            if (contentBlock && contentBlock.input && typeof contentBlock.input === 'object')
+              contentBlock.input = _antStreamingToolInputToString(contentBlock.input);
 
             // [Anthropic, 2025-11-24] Programmatic Tool Calling - detect if called from code execution
             const isProgrammaticCall = contentBlock.caller?.type === 'code_execution_20250825' || contentBlock.caller?.type === 'code_execution_20260120';
@@ -218,9 +229,10 @@ export function createAnthropicMessageParser(): ChatGenerateParseFunction {
             break;
 
           case 'server_tool_use':
-            // Streaming: zap empty input object since JSON will be streamed via input_json_delta
-            if (contentBlock && contentBlock.input && typeof contentBlock.input === 'object' && Object.keys(contentBlock.input).length === 0)
-              contentBlock.input = '';
+            // Streaming: same normalization as tool_use above ({} streams via input_json_delta;
+            // pre-populated objects are stringified so the += accumulation below stays consistent)
+            if (contentBlock && contentBlock.input && typeof contentBlock.input === 'object')
+              contentBlock.input = _antStreamingToolInputToString(contentBlock.input);
 
             _handleCBS_ServerToolUse(pt, contentBlock);
             break;
@@ -281,6 +293,16 @@ export function createAnthropicMessageParser(): ChatGenerateParseFunction {
         const contentBlock = responseMessage.content[index];
         if (contentBlock === undefined)
           throw new Error(`Unexpected content block delta location (${index})`);
+
+        // [2026-06-09] Forward-compat: ignore deltas addressed to unknown block types (already reported at content_block_start)
+        if (!AnthropicWire_Messages.isKnownContentBlockOutput(contentBlock))
+          break;
+
+        // [2026-06-09] Forward-compat: unknown delta types (e.g. 'compaction_delta') are reported and skipped
+        if (!AnthropicWire_API_Message_Create.isKnownContentBlockDelta(delta)) {
+          aixResilientUnknownValue('Anthropic', 'deltaType', delta.type);
+          break;
+        }
 
         if (ANTHROPIC_DEBUG_EVENT_SEQUENCE) {
           const debugInfo = delta.type === 'text_delta' ? `len=${delta.text.length}`
@@ -373,6 +395,10 @@ export function createAnthropicMessageParser(): ChatGenerateParseFunction {
         if (stoppedBlock === undefined)
           throw new Error(`Unexpected content block stop location (${index})`);
 
+        // [2026-06-09] Forward-compat: unknown block types were never started as message parts - nothing to finalize
+        if (!AnthropicWire_Messages.isKnownContentBlockOutput(stoppedBlock))
+          break;
+
         if (ANTHROPIC_DEBUG_EVENT_SEQUENCE) console.log(`ant content_block_stop[${index}]: type=${stoppedBlock.type}`);
 
         // Special cases - we usually do not handle block ends
@@ -414,6 +440,8 @@ export function createAnthropicMessageParser(): ChatGenerateParseFunction {
           pt.updateMetrics({
             TIn: chatInTokens !== undefined ? chatInTokens : -1,
             TOut: usage.output_tokens,
+            // reasoning tokens are a subset of output_tokens (already in TOut) - surfaced as a breakdown, like OpenAI/Gemini
+            ...(typeof usage.output_tokens_details?.thinking_tokens === 'number' ? { TOutR: usage.output_tokens_details.thinking_tokens } : {}),
             vTOutInner: Math.round(chatOutRate * 100) / 100, // Round to 2 decimal places
             dtStart: timeToFirstEvent,
             dtInner: elapsedTimeMilliseconds,
@@ -527,6 +555,13 @@ export function createAnthropicMessageParserNS(): ChatGenerateParseFunction {
     for (let i = 0; i < content.length; i++) {
       const contentBlock = content[i];
       const isLastBlock = i === content.length - 1;
+
+      // [2026-06-09] Forward-compat: skip unknown/future block types ('fallback', 'compaction', 'advisor_tool_result', ...)
+      if (!AnthropicWire_Messages.isKnownContentBlockOutput(contentBlock)) {
+        aixResilientUnknownValue('Anthropic-NS', 'contentBlockType', contentBlock.type);
+        continue;
+      }
+
       switch (contentBlock.type) { // .content_block (non-streaming)
         case 'text':
           // Hotfix Opus-4.6: elide first text block if it's '\n\n'
@@ -642,6 +677,9 @@ export function createAnthropicMessageParserNS(): ChatGenerateParseFunction {
         if (typeof usage.cache_creation_input_tokens === 'number')
           metricsUpdate.TCacheWrite = usage.cache_creation_input_tokens;
       }
+      // reasoning tokens are a subset of output_tokens (already in TOut) - surfaced as a breakdown, like OpenAI/Gemini
+      if (typeof usage.output_tokens_details?.thinking_tokens === 'number')
+        metricsUpdate.TOutR = usage.output_tokens_details.thinking_tokens;
       pt.updateMetrics(metricsUpdate);
     }
 
@@ -660,6 +698,16 @@ export function createAnthropicMessageParserNS(): ChatGenerateParseFunction {
 
 
 // --- Shared helpers (used by both S and NS parsers) ---
+
+/**
+ * [Anthropic streaming] Normalize a tool_use/server_tool_use `input` from content_block_start to the
+ * string that input_json_delta appends to: `{}` -> '' (args stream as deltas); a pre-populated
+ * object -> its JSON string (PTC: code execution computed the full args, no deltas follow).
+ * NS instead keeps the object and lets the transmitter ('json_object') do the stringify.
+ */
+function _antStreamingToolInputToString(input: object): string {
+  return Object.keys(input).length === 0 ? '' : JSON.stringify(input);
+}
 
 /** Ellipsize long strings for iTexts/oTexts display (keeps start + end, shows byte count in the middle) */
 function _ellipsizeContext(text: string, maxBytes = 512): string {
@@ -683,7 +731,7 @@ function _emitContainerState(pt: IParticleTransmitter, container: { id: string; 
 }
 
 /** Compose a human-readable error string from Anthropic's stop_details. Returns undefined when nothing useful to surface. */
-function _formatAnthropicStopError(stopDetails: { type: string; category?: string | null; explanation?: string | null } | null | undefined): string | undefined {
+function _formatAnthropicStopError(stopDetails: { type: string; category?: string | null; explanation?: string | null; recommended_model?: string | null } | null | undefined): string | undefined {
   if (!stopDetails) return undefined;
   if (stopDetails.type !== 'refusal') {
     aixResilientUnknownValue('Anthropic', 'stopDetailsType', stopDetails.type);
@@ -692,6 +740,7 @@ function _formatAnthropicStopError(stopDetails: { type: string; category?: strin
   const parts: string[] = [];
   if (stopDetails.category) parts.push(`[${stopDetails.category}]`);
   if (stopDetails.explanation) parts.push(stopDetails.explanation);
+  if (stopDetails.recommended_model) parts.push(`(consider retrying with ${stopDetails.recommended_model})`);
   return parts.length ? `Refusal: ${parts.join(' ')}` : undefined;
 }
 
@@ -1098,11 +1147,13 @@ function _fromAnthropicStopReason(stopReason: AnthropicWire_API_Message_Create.R
       // https://docs.claude.com/en/api/handling-stop-reasons#pause-turn
       return null;
 
-    default:
-      const _exhaustiveCheck: never = stopReason;
-    // fallthrough
     case null:
       console.warn(`_fromAnthropicStopReason(${debugCaller}): unexpected stop_reason: ${stopReason}`);
+      return null;
+
+    default:
+      // [2026-06-09] Forward-compat: unknown stop reasons (e.g. 'compaction' from the compact beta) must not kill the stream
+      aixResilientUnknownValue('Anthropic', 'stopReason', stopReason);
       return null;
   }
 }

@@ -7,7 +7,7 @@ import LocalFireDepartmentIcon from '@mui/icons-material/LocalFireDepartment';
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew';
 
 import type { DLLMMaxOutputTokens } from '~/common/stores/llms/llms.types';
-import { DModelParameterId, DModelParameterRegistry, DModelParameterSpecAny, DModelParameterValues, getAllModelParameterValues, LLMImplicitParametersRuntimeFallback } from '~/common/stores/llms/llms.parameters';
+import { DModelParameterId, DModelParameterRegistry, DModelParameterSpec, DModelParameterSpecAny, DModelParameterValues, getAllModelParameterValues, LLMImplicitParametersRuntimeFallback } from '~/common/stores/llms/llms.parameters';
 import { FormSelectControl } from '~/common/components/forms/FormSelectControl';
 import { FormSliderControl } from '~/common/components/forms/FormSliderControl';
 import { FormSwitchControl } from '~/common/components/forms/FormSwitchControl';
@@ -219,18 +219,25 @@ export function LLMParametersEditor(props: {
   const defGemTB = DModelParameterRegistry['llmVndGeminiThinkingBudget'];
 
   // specs: whether a models supports a parameter
-  const modelParamSpec = React.useMemo(() =>
+  const modelParamSpec: Partial<{ [K in DModelParameterId]: DModelParameterSpec<K> }> = React.useMemo(() =>
       Object.fromEntries((props.parameterSpecs ?? []).map(spec => [spec.paramId, spec]))
     , [props.parameterSpecs]);
 
 
-  // effort options: one memo for all vendors, filtered to model's allowed values
-  const { antEffortOptions, gemEffortOptions, oaiEffortOptions, miscEffortOptions } = React.useMemo(() => ({
-    antEffortOptions: llmParametersFilterEffortOptions(_antEffortOptions, modelParamSpec['llmVndAntEffort'], 'llmVndAntEffort'),
-    gemEffortOptions: llmParametersFilterEffortOptions(_gemEffortOptions, modelParamSpec['llmVndGemEffort'], 'llmVndGemEffort'),
-    oaiEffortOptions: llmParametersFilterEffortOptions(_oaiEffortOptions, modelParamSpec['llmVndOaiEffort'], 'llmVndOaiEffort'),
-    miscEffortOptions: llmParametersFilterEffortOptions(_miscEffortOptions, modelParamSpec['llmVndMiscEffort'], 'llmVndMiscEffort'),
-  }), [modelParamSpec]);
+  // enum options: one memo for all vendors, filtered to each model's allowed values (via parameterSpec.enumValues)
+  const { antEffortOptions, gemEffortOptions, oaiEffortOptions, miscEffortOptions, oaiWebSearchOptions } = React.useMemo(() => {
+    // web search: filter to the model's allowed levels; when restricted to a single level (e.g. Sakana's
+    // bare on/off web_search), relabel that lone level as a plain "On" (the "Off" entry is kept as-is).
+    const ws = llmParametersFilterEffortOptions(_webSearchContextOptions, modelParamSpec['llmVndOaiWebSearchContext'], 'llmVndOaiWebSearchContext');
+    const wsOnOff = ws?.filter(o => o.value !== _UNSPECIFIED).length === 1;
+    return {
+      antEffortOptions: llmParametersFilterEffortOptions(_antEffortOptions, modelParamSpec['llmVndAntEffort'], 'llmVndAntEffort'),
+      gemEffortOptions: llmParametersFilterEffortOptions(_gemEffortOptions, modelParamSpec['llmVndGemEffort'], 'llmVndGemEffort'),
+      oaiEffortOptions: llmParametersFilterEffortOptions(_oaiEffortOptions, modelParamSpec['llmVndOaiEffort'], 'llmVndOaiEffort'),
+      miscEffortOptions: llmParametersFilterEffortOptions(_miscEffortOptions, modelParamSpec['llmVndMiscEffort'], 'llmVndMiscEffort'),
+      oaiWebSearchOptions: ws?.map(o => (wsOnOff && o.value !== _UNSPECIFIED) ? { ...o, label: 'On' } : o) ?? null,
+    };
+  }, [modelParamSpec]);
 
 
   // current values: { ...fallback, ...baseline, ...user }
@@ -240,6 +247,7 @@ export function LLMParametersEditor(props: {
     llmTemperature, // null: no temperature, number: temperature value, undefined: shall not happen, we treat is similarly to null
     llmForceNoStream,
     llmVndAnt1MContext,
+    llmVndAntCodeSandbox,
     llmVndAntEffort,
     llmVndAntInfSpeed,
     llmVndAntSkills,
@@ -299,14 +307,16 @@ export function LLMParametersEditor(props: {
 
   // semantics
   function showParam(paramId: DModelParameterId): boolean {
-    return paramId in modelParamSpec && !modelParamSpec[paramId].hidden;
+    return paramId in modelParamSpec && !modelParamSpec[paramId]?.hidden;
   }
 
   // Anthropic adaptive(-1)/extended(>1024) thinking disables temperature control
   const _antThinkingDefined = 'llmVndAntThinkingBudget' in modelParamSpec;
   const antThinkingEnabled = _antThinkingDefined && !!llmVndAntThinkingBudget; // both mullish mean "off"
   const antThinkingEnabled_Adaptive = antThinkingEnabled && llmVndAntThinkingBudget === -1;
-  const antThinkingShown = _antThinkingDefined && !modelParamSpec['llmVndAntThinkingBudget'].hidden;
+  const antThinkingShown = _antThinkingDefined && !modelParamSpec['llmVndAntThinkingBudget']?.hidden;
+  const antInfSpeedTier = modelParamSpec['llmVndAntInfSpeed']?.enumValues?.[0];
+  const antInfSpeedMult = antInfSpeedTier && DModelParameterRegistry['llmVndAntInfSpeed'].enumPriceMultiplier?.[antInfSpeedTier];
 
   const gemThinkingAuto = llmVndGeminiThinkingBudget === undefined;
   const gemThinkingOff = llmVndGeminiThinkingBudget === 0;
@@ -547,6 +557,24 @@ export function LLMParametersEditor(props: {
       />
     )}
 
+    {showParam('llmVndAntCodeSandbox') && (
+      <FormSwitchControl
+        title='Code Sandbox'
+        description={llmVndAntSkills ? 'On (via Skills)' : 'Hosted-container sandbox'}
+        tooltip='Run code in a server-side hosted-container sandbox for data analysis, file processing, and charts. Document Skills and programmatic tool calls enable this automatically. Can be combined with Web Search/Fetch (free when used together).'
+        disabled={!!llmVndAntSkills} // Skills require the container, so it is implied-on and locked
+        checked={!!llmVndAntCodeSandbox || !!llmVndAntSkills}
+        onChange={checked => {
+          if (!checked) onRemoveParameter('llmVndAntCodeSandbox');
+          else onChangeParameter({ llmVndAntCodeSandbox: 'auto' });
+        }}
+      />
+    )}
+
+    {showParam('llmVndAntSkills') && (
+      <AnthropicSkillsConfig llmVndAntSkills={llmVndAntSkills} onChangeParameter={onChangeParameter} onRemoveParameter={onRemoveParameter} />
+    )}
+
     {showParam('llmVndAnt1MContext') && (
       <FormSwitchControl
         title='1M Context Window (Beta)'
@@ -564,18 +592,14 @@ export function LLMParametersEditor(props: {
     {showParam('llmVndAntInfSpeed') && (
       <FormSwitchControl
         title='Fast Mode (Preview)'
-        description={llmVndAntInfSpeed === 'fast' ? 'Fast - 6x pricing ⚠️' : 'Standard (default)'}
-        tooltip='Accelerated inference (~2.5x faster output) at 6x pricing. Preview access required.'
-        checked={llmVndAntInfSpeed === 'fast'}
+        description={llmVndAntInfSpeed ? `Fast - ${antInfSpeedMult}x pricing ⚠️` : 'Standard (default)'}
+        tooltip='Accelerated inference at premium pricing. Preview access may be required.'
+        checked={llmVndAntInfSpeed !== undefined}
         onChange={(checked) => {
           if (!checked) onRemoveParameter('llmVndAntInfSpeed');
-          else onChangeParameter({ llmVndAntInfSpeed: 'fast' });
+          else if (antInfSpeedTier) onChangeParameter({ llmVndAntInfSpeed: antInfSpeedTier });
         }}
       />
-    )}
-
-    {showParam('llmVndAntSkills') && (
-      <AnthropicSkillsConfig llmVndAntSkills={llmVndAntSkills} onChangeParameter={onChangeParameter} onRemoveParameter={onRemoveParameter} />
     )}
 
 
@@ -669,7 +693,7 @@ export function LLMParametersEditor(props: {
 
     {showParam('llmVndGeminiCodeExecution') && (
       <FormSelectControl
-        title='Code Execution'
+        title='Code Sandbox'
         tooltip='Enable automatic Python code generation and execution by the model'
         value={llmVndGeminiCodeExecution ?? _UNSPECIFIED}
         onChange={(value) => {
@@ -733,7 +757,7 @@ export function LLMParametersEditor(props: {
           else
             onChangeParameter({ llmVndOaiWebSearchContext: value });
         }}
-        options={_webSearchContextOptions}
+        options={oaiWebSearchOptions ?? _webSearchContextOptions}
       />
     )}
 
@@ -789,7 +813,7 @@ export function LLMParametersEditor(props: {
 
     {showParam('llmVndOaiCodeInterpreter') && (
       <FormSelectControl
-        title='Code Interpreter'
+        title='Code Sandbox'
         tooltip='Enable Python code execution in a sandboxed container. Costs $0.03 per container (expires after 20 minutes of inactivity).'
         value={llmVndOaiCodeInterpreter ?? _UNSPECIFIED}
         onChange={(value) => {
@@ -880,7 +904,7 @@ export function LLMParametersEditor(props: {
 
     {showParam('llmVndXaiCodeExecution') && (
       <FormSelectControl
-        title='Run Code'
+        title='Code Sandbox'
         value={llmVndXaiCodeExecution ?? _UNSPECIFIED}
         onChange={(value) => {
           if (value === _UNSPECIFIED || !value || value === 'off') onRemoveParameter('llmVndXaiCodeExecution');

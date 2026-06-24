@@ -2,7 +2,10 @@ import { LLM_IF_OAI_Chat, LLM_IF_OAI_Fn } from '~/common/stores/llms/llms.types'
 import { Release } from '~/common/app.release';
 
 import type { ModelDescriptionSchema } from '../../llm.server.types';
-import { fromManualMapping, llmDevCheckModels_DEV, ManualMappings } from '../../models.mappings';
+import { type KnownLink, type KnownModel, formatPubDate, fromManualMapping, llmDevCheckModels_DEV, llmsDefineModels } from '../../models.mappings';
+
+// --- Groq Model ID inference (auto-derived from _knownGroqModels) ---
+export type LlmsGroqModelId = typeof _knownGroqModels[number]['idPrefix'];
 import { wireGroqModelsListOutputSchema } from '../wiretypes/groq.wiretypes';
 
 
@@ -16,7 +19,9 @@ const DEV_DEBUG_GROQ_MODELS = Release.IsNodeDevBuild; // not in staging to reduc
  * - pricing: https://groq.com/pricing/
  * - updated: 2026-04-16
  */
-const _knownGroqModels: ManualMappings = [
+type _GroqModelDef = (KnownModel & { pubDate: string }) | KnownLink;
+
+const _knownGroqModels = llmsDefineModels<_GroqModelDef>()([
 
   // Preview Models
   {
@@ -149,7 +154,7 @@ const _knownGroqModels: ManualMappings = [
 
   // (Feb 18, 2026) allam-2-7b (SDAIA) removed from docs and pricing, still returned by API -> deny list
 
-];
+]);
 
 
 const groqDenyList: string[] = [
@@ -185,6 +190,12 @@ export function groqModelToModelDescription(_model: unknown): ModelDescriptionSc
     interfaces: [LLM_IF_OAI_Chat],
     hidden: true,
   });
+
+  // pubDate fallback: Groq's 'created' is verified real per-model dates (16/17 unique, 2023-2026 spread),
+  // so derive a day-precision pubDate to drive the "new" badge for models without an editorial pubDate.
+  // An editorial pubDate (from _knownGroqModels) always wins.
+  if (description.pubDate === undefined && description.created)
+    description.pubDate = formatPubDate(description.created);
 
   // prepend [model.owned_by] to the label
   if (model?.owned_by?.length)

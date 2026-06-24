@@ -191,12 +191,23 @@ export const DModelParameterRegistry = {
     // undefined means off (e.g. default 200K context window)
   },
 
+  llmVndAntCodeSandbox: _enumDef({
+    label: 'Code Sandbox',
+    type: 'enum',
+    description: 'Run code in a server-side hosted-container sandbox (data analysis, files, charts). Skills and programmatic tool calls enable this automatically.',
+    values: ['auto'],
+    // undefined means off (the code_execution_20260120 tool is not added). Enum (not boolean) for future
+    // extensibility, matching the other vendors' code-exec params (Gemini/xAI/OpenAI). UI renders as a toggle.
+  }),
+
   llmVndAntInfSpeed: _enumDef({
     label: 'Fast Mode',
     type: 'enum',
-    description: 'Accelerated inference (~2.5x faster output) at 6x pricing. Preview access required.',
-    values: ['fast'],
-    enumPriceMultiplier: { fast: 6 },
+    description: 'Accelerated inference (~2.5x faster output) at premium pricing. Preview access required.',
+    // The wire always sends speed:'fast'; the value encodes the per-model PRICE TIER (the cost multiplier differs by model).
+    // Each model exposes exactly one tier via its parameterSpec `enumValues`. 'fast' is the legacy alias (=6x) for params stored before tiers existed.
+    values: ['fast_2x', 'fast_6x', 'fast'],
+    enumPriceMultiplier: { fast_2x: 2, fast_6x: 6, fast: 6 },
     // undefined means standard speed (omitted from request)
   }),
 
@@ -298,7 +309,7 @@ export const DModelParameterRegistry = {
   }),
 
   llmVndGeminiCodeExecution: _enumDef({
-    label: 'Code Execution',
+    label: 'Code Sandbox',
     type: 'enum',
     description: 'Enable automatic Python code generation and execution by the model',
     values: ['auto'],
@@ -426,7 +437,7 @@ export const DModelParameterRegistry = {
   }),
 
   llmVndOaiCodeInterpreter: _enumDef({
-    label: 'Code Interpreter',
+    label: 'Code Sandbox',
     type: 'enum',
     description: 'Python code execution ($0.03/container)',
     values: ['off', 'auto'],
@@ -467,7 +478,7 @@ export const DModelParameterRegistry = {
   // xAI-specific parameters
 
   llmVndXaiCodeExecution: _enumDef({
-    label: 'Code Execution',
+    label: 'Code Sandbox',
     type: 'enum',
     description: 'Enable server-side code execution by the model',
     values: ['off', 'auto'],

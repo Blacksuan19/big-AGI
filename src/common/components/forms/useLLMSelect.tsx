@@ -137,7 +137,8 @@ interface LLMSelectOptions {
   placeholder?: string;
   isHorizontal?: boolean;
   setLlmToAuto?: () => void; // caller-supplied strategy to reset to Auto (e.g. assignDomainModelAuto for domain-backed, or undefined for backends with no Auto concept). When provided, the Auto option/indicator are surfaced.
-  isLlmAuto?: boolean; // when true, render the selected label as "Auto (<resolved name>)" and surface the AutoMode indicator (requires setLlmIdToAuto)
+  isLlmAuto?: boolean; // when true, render the selected label as "Auto (<resolved name>)" and surface the AutoMode indicator (requires setLlmToAuto)
+  autoModelLabel?: string; // display label of the model Auto resolves to, regardless of the current pin; used to label the Auto option
   appendConfigureModels?: boolean; // appends a bottom option to open the Models panel
   showStarFilter?: boolean; // show a button to filter starred models only
 }
@@ -147,7 +148,7 @@ interface LLMSelectOptions {
  *
  * @param llmId (required) the LLM id
  * @param setLlmId (required) function to set the LLM id to a specific model (explicit pin)
- * @param options (required) the options bag. `setLlmIdToAuto` here is the caller-supplied
+ * @param options (required) the options bag. `setLlmToAuto` here is the caller-supplied
  *        reset-to-Auto strategy: pass it for backends that support Auto (domain-backed hooks
  *        pass `assignDomainModelAuto`), omit for backends with no Auto concept.
  */
@@ -158,7 +159,7 @@ export function useLLMSelect(
 ): [DLLM | null, React.JSX.Element | null] {
 
   // options
-  const { label, larger = false, disabled = false, placeholder = LLM_TEXT_PLACEHOLDER, isHorizontal = false, isLlmAuto = false, setLlmToAuto, appendConfigureModels = false, showStarFilter = false } = options;
+  const { label, larger = false, disabled = false, placeholder = LLM_TEXT_PLACEHOLDER, isHorizontal = false, isLlmAuto = false, setLlmToAuto, autoModelLabel, appendConfigureModels = false, showStarFilter = false } = options;
 
   // state
   const [controlledOpen, setControlledOpen] = React.useState(false);
@@ -353,12 +354,12 @@ export function useLLMSelect(
         {setLlmToAuto && !hasNoModels && (
           <Option key='auto-option' value={LLM_SPECIAL_AUTO_ID} label={
             <div className='agi-ellipsize'>
-              Auto{llm ? <span style={{ opacity: 0.6 }}>: {getLLMLabel(llm)}</span> : null}
+              Auto{autoModelLabel ? <span style={{ opacity: 0.6 }}>: {autoModelLabel}</span> : null}
             </div>
           }>
             <ListItemDecorator><AutoModeIcon /></ListItemDecorator>
             <div className='agi-ellipsize'>
-              Auto{llm ? <span style={{ opacity: 0.6 }}>: {getLLMLabel(llm)}</span> : null}
+              Auto{autoModelLabel ? <span style={{ opacity: 0.6 }}>: {autoModelLabel}</span> : null}
             </div>
           </Option>
         )}
@@ -395,7 +396,7 @@ export function useLLMSelect(
       </Select>
       {/*</Box>*/}
     </FormControl>
-  ), [appendConfigureModels, controlledOpen, disabled, hasNoModels, hasStarred, isHorizontal, isLlmAuto, isReasoning, label, larger, listboxSlotPropsStable, llm, onSelectChange, optimizeToSingleVisibleId, options.color, options.sx, options.variant, optionsArray, placeholder, selectValue, setLlmToAuto, showNoOptions, showStarFilter, starredOnly]);
+  ), [appendConfigureModels, autoModelLabel, controlledOpen, disabled, hasNoModels, hasStarred, isHorizontal, isLlmAuto, isReasoning, label, larger, listboxSlotPropsStable, onSelectChange, optimizeToSingleVisibleId, options.color, options.sx, options.variant, optionsArray, placeholder, selectValue, setLlmToAuto, showNoOptions, showStarFilter, starredOnly]);
 
   return [llm, llmSelectComponent];
 }

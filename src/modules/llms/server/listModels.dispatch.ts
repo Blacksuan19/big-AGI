@@ -50,6 +50,7 @@ import { mistralModels } from './openai/models/mistral.models';
 import { moonshotModelFilter, moonshotModelSortFn, moonshotModelToModelDescription } from './openai/models/moonshot.models';
 import { openRouterInjectVariants, openRouterModelFamilySortFn, openRouterModelToModelDescription } from './openai/models/openrouter.models';
 import { openAIInjectVariants, openAIModelFilter, openAIModelToModelDescription, openAISortModels, openaiValidateModelDefs_DEV } from './openai/models/openai.models';
+import { sakanaAIModelsToModelDescriptions } from './openai/models/sakanaai.models';
 import { perplexityHardcodedModelDescriptions, perplexityInjectVariants } from './openai/models/perplexity.models';
 import { tlusApiHeuristic, tlusApiTryParse } from './openai/models/tlusapi.models';
 import { togetherAIModelsToModelDescriptions } from './openai/models/together.models';
@@ -61,7 +62,7 @@ import { zaiCuratedModelDescriptions, zaiDiscoverModels, zaiModelSort } from './
 
 export type ListModelsDispatch<TWireModels = any> = {
   fetchModels: () => Promise<TWireModels>;
-  convertToDescriptions: (wireModels: TWireModels) => ModelDescriptionSchema[];
+  convertToDescriptions: (wireModels: TWireModels) => ReadonlyArray<ModelDescriptionSchema>;
 };
 
 /**
@@ -130,7 +131,7 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
             const m = id.match(/-(\d)(?:-(\d)(?!\d))?/);
             return m ? +m[1] + (m[2] ? +m[2] / 10 : 0) : 0;
           };
-          const classPrecedence = ['-opus-', '-sonnet-', '-haiku-'];
+          const classPrecedence = ['-fable-', '-mythos-', '-opus-', '-sonnet-', '-haiku-'];
           const getClassIdx = (id: string) => classPrecedence.findIndex(c => id.includes(c));
 
           return availableModels
@@ -377,8 +378,9 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
     case 'moonshot':
     case 'openai':
     case 'openrouter':
+    case 'sakanaai':
     case 'togetherai':
- 
+
       // Effective URL and headers - respects OPENAI_API_HOST server env and default hosts
       const { headers: oaiHeaders, url: oaiUrl } = openAIAccess(access, null, OPENAI_API_PATHS.models);
 
@@ -526,6 +528,10 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
                 .map(openRouterModelToModelDescription)
                 .filter(desc => !!desc)
                 .reduce(openRouterInjectVariants, []);
+
+            case 'sakanaai':
+              // [Sakana.ai] Fugu models - API lists ids only; caps/pricing/params from manual mappings
+              return sakanaAIModelsToModelDescriptions(maybeModels);
 
             default:
               const _exhaustiveCheck: never = dialect;

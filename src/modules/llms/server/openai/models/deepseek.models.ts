@@ -2,7 +2,10 @@ import { LLM_IF_HOTFIX_StripImages, LLM_IF_OAI_Chat, LLM_IF_OAI_Fn, LLM_IF_OAI_R
 
 import type { ModelDescriptionSchema } from '../../llm.server.types';
 
-import { fromManualMapping, ManualMappings } from '../../models.mappings';
+import { llmsDefineManualMappings, fromManualMapping } from '../../models.mappings';
+
+// --- Deepseek Model ID inference (auto-derived from _knownDeepseekChatModels) ---
+export type LlmsDeepseekModelId = typeof _knownDeepseekChatModels[number]['idPrefix'];
 
 
 const IF_4 = [LLM_IF_HOTFIX_StripImages, LLM_IF_OAI_Chat, LLM_IF_OAI_Fn];
@@ -16,7 +19,7 @@ const IF_4 = [LLM_IF_HOTFIX_StripImages, LLM_IF_OAI_Chat, LLM_IF_OAI_Fn];
 //   (the live API also accepts type: 'adaptive', but it is undocumented and empirically behaves the same as 'enabled'
 //    on current builds -- deliberately not exposed here; add it once docs + semantics stabilize)
 // - V3.2 endpoints no longer accessible via direct model ID (API returns only v4-flash/v4-pro)
-const _knownDeepseekChatModels: ManualMappings = [
+const _knownDeepseekChatModels = llmsDefineManualMappings([
   {
     idPrefix: 'deepseek-v4-pro',
     label: 'DeepSeek V4 Pro',
@@ -28,8 +31,8 @@ const _knownDeepseekChatModels: ManualMappings = [
       { paramId: 'llmVndMiscEffort', enumValues: ['none', 'high', 'max'] },
     ],
     maxCompletionTokens: 65536, // conservative default; docs advertise up to 384K
-    chatPrice: { input: 1.74, output: 3.48, cache: { cType: 'oai-ac', read: 0.145 } },
-    benchmark: { cbaElo: 1463 }, // lmarena: deepseek-v4-pro (thinking variant 1462, near-tied)
+    chatPrice: { input: 0.435, output: 0.87, cache: { cType: 'oai-ac', read: 0.003625 } },
+    benchmark: { cbaElo: 1458 }, // lmarena: deepseek-v4-pro-thinking
   },
   {
     idPrefix: 'deepseek-v4-flash',
@@ -42,8 +45,8 @@ const _knownDeepseekChatModels: ManualMappings = [
       { paramId: 'llmVndMiscEffort', enumValues: ['none', 'high', 'max'] },
     ],
     maxCompletionTokens: 65536, // conservative default; docs advertise up to 384K
-    chatPrice: { input: 0.14, output: 0.28, cache: { cType: 'oai-ac', read: 0.028 } },
-    benchmark: { cbaElo: 1439 }, // lmarena: deepseek-v4-flash-thinking (non-thinking variant 1433)
+    chatPrice: { input: 0.14, output: 0.28, cache: { cType: 'oai-ac', read: 0.0028 } },
+    benchmark: { cbaElo: 1436 }, // lmarena: deepseek-v4-flash-thinking
   },
   // Legacy aliases - API routes both to deepseek-v4-flash with thinking pre-set
   {
@@ -53,8 +56,8 @@ const _knownDeepseekChatModels: ManualMappings = [
     contextWindow: 1_048_576,
     interfaces: [...IF_4, LLM_IF_OAI_Reasoning],
     maxCompletionTokens: 65536,
-    chatPrice: { input: 0.14, output: 0.28, cache: { cType: 'oai-ac', read: 0.028 } },
-    benchmark: { cbaElo: 1439 }, // lmarena: deepseek-v4-flash-thinking
+    chatPrice: { input: 0.14, output: 0.28, cache: { cType: 'oai-ac', read: 0.0028 } },
+    benchmark: { cbaElo: 1436 - 1 }, // lmarena: deepseek-v4-flash-thinking - 1 (yield)
     isLegacy: true,
   },
   {
@@ -64,11 +67,11 @@ const _knownDeepseekChatModels: ManualMappings = [
     contextWindow: 1_048_576,
     interfaces: IF_4,
     maxCompletionTokens: 65536,
-    chatPrice: { input: 0.14, output: 0.28, cache: { cType: 'oai-ac', read: 0.028 } },
-    benchmark: { cbaElo: 1433 }, // lmarena: deepseek-v4-flash (non-thinking)
+    chatPrice: { input: 0.14, output: 0.28, cache: { cType: 'oai-ac', read: 0.0028 } },
+    benchmark: { cbaElo: 1436 - 2 }, // lmarena: deepseek-v4-flash-thinking - 2 (yield)
     isLegacy: true,
   },
-];
+]);
 
 const _unsupportedModelIds = [
   'deepseek-coder',

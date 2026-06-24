@@ -1,5 +1,7 @@
 import { findServiceAccessOrThrow } from '~/modules/llms/vendors/vendor.helpers';
 
+import { vertexLinksAutoResolveFragments } from '~/modules/google/vertexai.client';
+
 import type { MaybePromise } from '~/common/types/useful.types';
 import { AIVndAntInlineFilesPolicy, getVndAntInlineFiles } from '~/common/stores/store-ai';
 import { AudioPlayer } from '~/common/util/audio/AudioPlayer';
@@ -17,8 +19,9 @@ import { metricsStoreAddChatGenerate } from '~/common/stores/metrics/store-metri
 import { stripUndefined } from '~/common/util/objectUtils';
 import { webGeolocationCached } from '~/common/util/webGeolocationUtils';
 
+
 // NOTE: pay particular attention to the "import type", as this is importing from the server-side Zod definitions
-import type { AixAPI_Access, AixAPI_ConnectionOptions_ChatGenerate, AixAPI_Context_ChatGenerate, AixAPI_Model, AixAPIChatGenerate_Request } from '../server/api/aix.wiretypes';
+import type { AixAPI_Access, AixAPI_ConnectionOptions_ChatGenerate, AixAPI_Context_ChatGenerate, AixAPI_Model, AixAPIChatGenerate_Request, AixTools_ToolDefinition, AixTools_ToolsPolicy } from '../server/api/aix.wiretypes';
 
 import { AixStreamRetry } from './aix.client.retry';
 import { ReassemblerParticleTransforms, ContentReassembler } from './ContentReassembler';
@@ -68,7 +71,7 @@ export function aixCreateModelFromLLMOptions(
   const {
     llmRef, llmTemperature, llmResponseTokens, llmTopP, llmForceNoStream,
     llmVndAntEffort, llmVndGemEffort, llmVndOaiEffort, llmVndMiscEffort,
-    llmVndAnt1MContext, llmVndAntInfSpeed, llmVndAntSkills, llmVndAntThinkingBudget, llmVndAntWebDynamic, llmVndAntWebFetch, llmVndAntWebFetchMaxUses, llmVndAntWebSearch, llmVndAntWebSearchMaxUses,
+    llmVndAnt1MContext, llmVndAntCodeSandbox, llmVndAntInfSpeed, llmVndAntSkills, llmVndAntThinkingBudget, llmVndAntWebDynamic, llmVndAntWebFetch, llmVndAntWebFetchMaxUses, llmVndAntWebSearch, llmVndAntWebSearchMaxUses,
     llmVndBedrockAPI,
     llmVndGeminiAgentViz, llmVndGeminiAspectRatio, llmVndGeminiImageSize, llmVndGeminiCodeExecution, llmVndGeminiComputerUse, llmVndGeminiGoogleSearch, llmVndGeminiMediaResolution, llmVndGeminiThinkingBudget,
     // llmVndMoonshotWebSearch,
@@ -132,7 +135,8 @@ export function aixCreateModelFromLLMOptions(
     // Anthropic - (vndAntContainerId, vndAntTransformInlineFiles are set in the decorate function)
     ...(llmVndAntThinkingBudget !== undefined ? { vndAntThinkingBudget: llmVndAntThinkingBudget === -1 ? 'adaptive' as const : llmVndAntThinkingBudget } : {}),
     ...(llmVndAnt1MContext ? { vndAnt1MContext: llmVndAnt1MContext } : {}),
-    ...(llmVndAntInfSpeed === 'fast' ? { vndAntInfSpeed: 'fast' } : {}),
+    ...(llmVndAntCodeSandbox === 'auto' ? { vndAntCodeSandbox: llmVndAntCodeSandbox } : {}), // standalone server-side code sandbox (Skills/PTC also enable it server-side)
+    ...(llmVndAntInfSpeed ? { vndAntInfSpeed: 'fast' } : {}), // any tier (fast_2x/fast_6x/legacy fast) collapses to the wire 'fast'
     ...(llmVndAntSkills ? { vndAntSkills: llmVndAntSkills } : {}),
     ...(llmVndAntWebDynamic ? { vndAntWebDynamic: true } : {}),
     ...(llmVndAntWebFetch === 'auto' ? { vndAntWebFetch: llmVndAntWebFetch, ...(llmVndAntWebFetchMaxUses ? { vndAntWebFetchMaxUses: llmVndAntWebFetchMaxUses } : {}) } : {}),
@@ -186,6 +190,8 @@ export function aixCreateModelFromLLMOptions(
 export function aixDecorateModelFromGlobals(model: AixAPI_Model, decorations: {
   // [Anthropic Container] Container ID from a prior turn (caller is responsible for expiry checks)
   vndAntContainerId?: string;
+  // [OpenAI Responses Container] Code-interpreter container from a prior turn (caller is responsible for expiry checks)
+  vndOaiContainerId?: string;
   // [Anthropic File Inlining] Global user policy; 'off' means don't decorate (caller can pass it raw)
   vndAntTransformInlineFiles?: AIVndAntInlineFilesPolicy;
   // [Gemini Interactions] Session/sandbox env ID from a prior turn (no expiry gate on the wire today)
@@ -195,6 +201,10 @@ export function aixDecorateModelFromGlobals(model: AixAPI_Model, decorations: {
   // [Anthropic Container] Inject session state from a prior turn
   if (decorations.vndAntContainerId)
     model.vndAntContainerId = decorations.vndAntContainerId;
+
+  // [OpenAI Responses Container] Inject session container from a prior turn (ignored by non-Responses adapters)
+  if (decorations.vndOaiContainerId)
+    model.vndOaiContainerId = decorations.vndOaiContainerId;
 
   // [Anthropic File Inlining] Apply only when not 'off' - the wire enum doesn't include 'off'
   if (decorations.vndAntTransformInlineFiles && decorations.vndAntTransformInlineFiles !== 'off')
@@ -222,7 +232,12 @@ interface AixClientOptions {
   // -- Session State - extract? --
   // Cross-turn sandbox/container handles. Caller may pre-populate; resolver walks chat history to fill any unset slot.
   antContainerId?: string;            // [Anthropic Container] Container ID from a prior turn (caller checks expiry before setting)
+  oaiContainerId?: string;            // [OpenAI Responses Container] Code-interpreter container from a prior turn (caller checks expiry before setting)
   gemEnvironmentId?: string;                  // [Gemini Interactions] Session/sandbox env id from a prior turn (today: Antigravity; no expiry on the wire; best-effort - no auto-fallback if upstream rejects)
+
+  // Client-side tools (e.g., persona memory update)
+  tools?: AixTools_ToolDefinition[];
+  toolsPolicy?: AixTools_ToolsPolicy;
 }
 
 
@@ -292,6 +307,8 @@ export async function aixChatGenerateContent_DMessage_FromConversation(
     const aixChatContentGenerateRequest: AixAPIChatGenerate_Request = {
       systemMessage: await aixCGR_SystemMessage_FromDMessageOrThrow(chatSystemInstruction),
       chatSequence: await aixCGR_ChatSequence_FromDMessagesOrThrow(chatHistoryWithoutSystemMessages),
+      ...(clientOptions.tools?.length ? { tools: clientOptions.tools } : undefined),
+      ...(clientOptions.toolsPolicy ? { toolsPolicy: clientOptions.toolsPolicy } : undefined),
     };
 
     // Cross-turn upstream-container resolution. Walks history newest-first, stops at the first
@@ -301,6 +318,11 @@ export async function aixChatGenerateContent_DMessage_FromConversation(
     if (!clientOptions.antContainerId) {
       const uc = _findRecentUpstreamContainer(chatHistoryWithoutSystemMessages, 'vnd.ant.container');
       if (uc) clientOptions = { ...clientOptions, antContainerId: uc.containerId };
+    }
+    if (!clientOptions.oaiContainerId) {
+      // OpenAI Responses: expiresAt is stamped now+20min by the parser; the 15s buffer falls back to auto-create when stale.
+      const uc = _findRecentUpstreamContainer(chatHistoryWithoutSystemMessages, 'vnd.oai.container');
+      if (uc) clientOptions = { ...clientOptions, oaiContainerId: uc.containerId };
     }
     if (!clientOptions.gemEnvironmentId) {
       const uc = _findRecentUpstreamContainer(chatHistoryWithoutSystemMessages, 'vnd.gem.interactions');
@@ -582,6 +604,7 @@ export async function aixChatGenerateContent_DMessage_orThrow<TServiceSettings e
   const aixModel = aixCreateModelFromLLMOptions(llm.interfaces, llmParameters, clientOptions?.llmOptionsOverride, llmId);
   aixDecorateModelFromGlobals(aixModel, {
     vndAntContainerId: clientOptions?.antContainerId,
+    vndOaiContainerId: clientOptions?.oaiContainerId,
     vndAntTransformInlineFiles: aixAccess.dialect === 'anthropic' ? getVndAntInlineFiles() : undefined,
     vndGeminiEnvironmentId: clientOptions?.gemEnvironmentId,
   });
@@ -636,6 +659,14 @@ export async function aixChatGenerateContent_DMessage_orThrow<TServiceSettings e
   const metrics = _finalizeLlmMetricsWithCosts(cgMetricsLg, llm, `aix_chatgenerate_content-${aixContext.name}`);
   if (metrics) dMessage.generator = { ...dMessage.generator, metrics };
   dMessage.pendingIncomplete = false;
+
+  // [#1114] resolve Gemini/Vertex AI grounding redirect links before the final 'done' update, so every
+  // caller (chat, Beam scatter/fusion, reattach) gets resolved links atomically with completion.
+  // Policy-gated (no-op unless 'resolve') and timeout-capped; failures keep the originals.
+  if (outcome === 'completed' && dMessage.fragments.length) {
+    const resolvedFragments = await vertexLinksAutoResolveFragments(dMessage.fragments);
+    if (resolvedFragments) dMessage.fragments = resolvedFragments;
+  }
 
   // final update
   await onStreamingUpdate?.(dMessage, true);
@@ -728,18 +759,18 @@ export async function aixReattachContent_DMessage_orThrow(
 // --- L2 - Delete upstream handle (symmetric to reattach) ---
 
 /**
- * Delete facade: DELETE the upstream-stored run identified by the generator's handle.
+ * Delete facade: DELETE the upstream-stored run identified by its handle.
  * Symmetric to `aixReattachContent_DMessage_orThrow` but terminal - after this, the handle is gone upstream.
  *
- * Does NOT mutate the DMessage - the caller decides how to react (typically clear the handle on ok).
- * Shape mirrors reattach: resolve access from the generator's llmId, then call the procedure (tRPC or CSF).
+ * Does NOT mutate any DMessage - the caller decides how to react (typically clear the handle on ok).
+ * Shape mirrors reattach: resolve access from the llmId, then call the procedure (tRPC or CSF).
  */
 export async function aixDeleteUpstreamContent_orThrow(
   llmId: DLLMId,
-  generator: Readonly<DMessageGenerator>,
+  upstreamHandle: Readonly<DMessageGenerator['upstreamHandle']>,
   abortSignal?: AbortSignal,
 ) {
-  if (!generator.upstreamHandle) throw new Error('aixDeleteUpstreamContent: generator must have an upstreamHandle');
+  if (!upstreamHandle) throw new Error('aixDeleteUpstreamContent: missing upstreamHandle');
 
   // short-circuit if already expired upstream - no network call, caller can clear locally.
   // if (expiresAt != null && Date.now() > expiresAt)
@@ -752,10 +783,10 @@ export async function aixDeleteUpstreamContent_orThrow(
   // AIX [CSF] Direct delete when the vendor supports it
   if (aixAccess.clientSideFetch) {
     const { clientSideDeleteUpstream } = await _loadCsfModuleOrThrow();
-    return await clientSideDeleteUpstream(aixAccess, generator.upstreamHandle, abortSignal ?? new AbortController().signal);
+    return await clientSideDeleteUpstream(aixAccess, upstreamHandle, abortSignal ?? new AbortController().signal);
   }
   // ... otherwise, tRPC delete
-  return await apiAsync.aix.upstreamDeleteContent.mutate({ access: aixAccess, upstreamHandle: generator.upstreamHandle }, { signal: abortSignal });
+  return await apiAsync.aix.upstreamDeleteContent.mutate({ access: aixAccess, upstreamHandle: upstreamHandle }, { signal: abortSignal });
 }
 
 
@@ -983,9 +1014,9 @@ async function _aixChatGenerateContent_LL(
        * causing "closed connection" exceptions when resuming. Processing happens in
        * ContentReassembler's background promise chain.
        *
-       * Error handling split:
-       * - This catch: tRPC/network errors (connection, stream, abort)
-       * - Reassembler catch: processing errors (malformed particles, async work)
+       * Error handling split (see the channel map in aix.client.errors.ts):
+       * - This catch [Error Channel 1]: tRPC/network/transport errors (connection, stream, abort) -> aixClassifyStreamingError
+       * - Reassembler catch [Error Channel 2]: particle-processing errors (malformed particles, async work) -> aixClassifyReassemblyError
        */
       for await (const particle of particleStream)
         reassembler.enqueueWireParticle(particle);

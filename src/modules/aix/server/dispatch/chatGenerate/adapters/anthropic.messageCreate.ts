@@ -45,17 +45,24 @@ export function aixAnthropicHostedFeatures(model: AixAPI_Model, chatGenerate: Ai
     ),
   ) ?? false;
 
-  // [Anthropic, issue #1087] Dynamic web tools (20260209) have INTERNAL code execution. We do not
-  // explicitly add the code_execution tool nor the beta header for them: Anthropic enables what is
-  // needed implicitly behind the scenes.
+  // [Anthropic] Code execution (the explicit code_execution_20260120 tool + container) is triggered
+  // three ways, all converging on ONE explicit container: the standalone Code Sandbox toggle (a
+  // general-purpose hosted-container sandbox), Skills (which run inside the container), and Programmatic Tool Calling
+  // (which uses the container as its script executor).
+  // Dynamic web tools (_20260209) have their OWN internal code execution. We never AUTO-enable the
+  // standalone tool from them (#1087: a 2nd implicit environment is parasitic), nor from container
+  // continuity alone. We DO honor an explicit user toggle even alongside dynamic web: Anthropic's
+  // docs note this can create two execution environments that may confuse the model (mitigable via
+  // system prompt) - https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools#dynamic-filtering-with-code-execution
   return {
     disableAllHostedTools: !!(_hasAixCustomTools && _hasAixToolRestrictivePolicy),
     enable1MContext: model.vndAnt1MContext === true,
     enableCodeExecution:
-      !!model.vndAntSkills ||
-      // || hasDynamicWebTools // https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools#dynamic-filtering-with-code-execution
-      // || !!model.vndAntContainerId // do not re-enable code execution jsut for continuity - would have parasitic effects: https://github.com/enricoros/big-AGI/issues/1087#issuecomment-4340352958
-      programmaticToolCalling,
+      model.vndAntCodeSandbox === 'auto' || // standalone user toggle (general-purpose hosted-container sandbox)
+      !!model.vndAntSkills || // Skills execute inside the code execution container
+      // || hasDynamicWebTools // NOT auto-enabled - dynamic web executes code internally; see note above
+      // || !!model.vndAntContainerId // NOT re-enabled just for continuity - parasitic: https://github.com/enricoros/big-AGI/issues/1087#issuecomment-4340352958
+      programmaticToolCalling, // PTC uses the container as its script executor
     enableFastMode: model.vndAntInfSpeed === 'fast',
     enableSkills: !!model.vndAntSkills,
     enableStrictOutputs: !!model.strictJsonOutput || !!model.strictToolInvocations,
@@ -191,14 +198,35 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
     delete payload.temperature;
   }
 
+  // [Anthropic, 2026-06-09] Fable 5 / Mythos 5: adaptive is the only thinking mode - 'enabled' (budget_tokens) and 'disabled' return 400
+  const hotFixAdaptiveThinkingOnlyModel = /claude-(fable|mythos)-5/.test(model.id);
+
+  // HOTFIX: Fable/Mythos 5 reject forced tool use: 400 'tool_choice forces tool use is not compatible with this model.'
+  // (model-level, regardless of thinking config). Downgrade to 'auto' + a system hint - empirically the model
+  // reliably calls the tool when instructed. Forced tool use is deprecated AIX-wide, see ToolsPolicy_schema.
+  if (hotFixAdaptiveThinkingOnlyModel && payload.tool_choice && (payload.tool_choice.type === 'any' || payload.tool_choice.type === 'tool')) {
+    const mustUseHint = payload.tool_choice.type === 'tool'
+      ? `IMPORTANT: You MUST respond by calling the \`${payload.tool_choice.name}\` tool. Do not respond with text.`
+      : 'IMPORTANT: You MUST respond by calling one of the provided tools. Do not respond with text.';
+    console.log(`[Anthropic] ${model.id}: coercing tool_choice '${payload.tool_choice.type}' -> 'auto' (forced tool use rejected by this model)`);
+    payload.tool_choice = { type: 'auto' };
+    payload.system = [...(payload.system ?? []), AnthropicWire_Blocks.TextBlock(mustUseHint, 'hotfix.forced-tools')];
+    // Forced-tool requests are utility flows (autotitle, diagrams, follow-ups): adaptive thinking cannot be
+    // disabled on these models, so default effort to 'low' to bound the thinking spend (caller-overridable)
+    if (!model.reasoningEffort)
+      payload.output_config = { effort: 'low' };
+  }
+
   // [Anthropic] Thinking: adaptive (4.6+), enabled with budget (≤4.5), or disabled
   const areToolCallsRequired = payload.tool_choice && typeof payload.tool_choice === 'object' && (payload.tool_choice.type === 'any' || payload.tool_choice.type === 'tool');
   const canUseThinking = !areToolCallsRequired || !hotFixDisableThinkingWhenToolsForced;
   if (model.vndAntThinkingBudget !== undefined && canUseThinking) {
-    if (model.vndAntThinkingBudget === 'adaptive') {
+    if (model.vndAntThinkingBudget === 'adaptive' || hotFixAdaptiveThinkingOnlyModel) {
+      if (model.vndAntThinkingBudget !== 'adaptive')
+        console.log(`[Anthropic] ${model.id}: coercing thinking '${model.vndAntThinkingBudget}' -> 'adaptive' (adaptive-only model)`);
       payload.thinking = {
         type: 'adaptive',
-        display: 'summarized', // Opus 4.7 defaults to 'omitted' - explicit 'summarized' preserves 4.6-era UX (slight latency cost)
+        display: 'summarized', // Opus 4.7+ and Fable/Mythos 5 default to 'omitted' - explicit 'summarized' preserves 4.6-era UX (slight latency cost)
       };
       delete payload.temperature;
     } else if (model.vndAntThinkingBudget !== null) {
@@ -229,10 +257,10 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
   // [Anthropic, 2026-01-29 GA] Structured Outputs - JSON output format (now in output_config.format)
   if (model.strictJsonOutput) {
 
-    // auto-add additionalProperties: false to root object if not present - required by Anthropic
+    // auto-add additionalProperties: false to every object node if not present - required by Anthropic (see _strictNormalizeSchema)
     let schema = model.strictJsonOutput.schema;
-    if (schema && typeof schema === 'object' && schema.type === 'object' && schema.additionalProperties === undefined)
-      schema = { ...schema, additionalProperties: false };
+    if (schema && typeof schema === 'object')
+      schema = _strictNormalizeSchema(schema);
     payload.output_config = {
       ...payload.output_config,
       format: { type: 'json_schema', schema },
@@ -291,9 +319,11 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
         name: 'tool_search_tool_bm25',
       });
 
-    // Code Execution tool - for Skills, container reuse, and Programmatic Tool Calling.
-    // Note: NOT added for dynamic web tools (_20260209) - they execute code internally and adding
-    // a standalone environment confuses the model (issue #1087).
+    // Code execution tool (Anthropic's) - added for the Code Sandbox toggle, Skills, container reuse, and Programmatic Tool Calling.
+    // Not AUTO-added for dynamic web tools (_20260209) which execute code internally; an explicit user
+    // toggle may still coexist with them by design (see aixAnthropicHostedFeatures note re #1087).
+    // Keep _20260120: it matches the code execution version dynamic web auto-injects, so coexisting
+    // merges into ONE environment. An older version (e.g. _20250825) 400s: 'tool names must be unique'.
     if (enableCodeExecution)
       hostedTools.push({ type: 'code_execution_20260120', name: 'code_execution' });
 
@@ -303,9 +333,20 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
     }
   }
 
-  // --- Container - for code execution (Skills, dynamic filtering, etc.) continuity between calls ---
+  // --- Container continuity between calls ---
+  // Re-attaching the container is DECOUPLED from enableCodeExecution: dynamic web tools (_20260209)
+  // use a container internally, and the API accepts a `container` alongside them WITHOUT the standalone
+  // code_execution tool (empirically verified). So we keep ONE sandbox across mixed search/skills/code
+  // turns - a file written by code execution survives an intervening search turn (verified: ls /tmp). This
+  // does NOT add code_execution to dynamic-web turns (so #1087 stays fixed). When nothing container-using
+  // is active (no code exec, no skills, no PTC, no dynamic web), no container is sent. Plain (non-dynamic)
+  // web search creates no container, so it is intentionally excluded.
+  // Retention: a reused container is server-retained ~30 days (same profile as the Skills/code-exec
+  // containers we already reuse) - dynamic-web conversations now share one retained sandbox per
+  // conversation instead of a fresh one each turn.
+  const hasDynamicWeb = model.vndAntWebDynamic === true && (model.vndAntWebSearch === 'auto' || model.vndAntWebFetch === 'auto');
 
-  if (enableCodeExecution) {
+  if (enableCodeExecution || hasDynamicWeb) {
 
     // Container ID from a previous turn (expiry already checked client-side)
     const containerId = model.vndAntContainerId;
@@ -414,7 +455,9 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
                 toolUseBlock = AnthropicWire_Blocks.ToolUseBlock(part.id, part.invocation.name, part.invocation.args);
                 break;
               case 'code_execution':
-                toolUseBlock = AnthropicWire_Blocks.ToolUseBlock(part.id, 'execute_code' /* suboptimal */, part.invocation.code);
+                // wrap the raw code into a dict (Anthropic native code_execution input shape is { code }): ToolUseBlock JSON.parses its
+                // input, and Anthropic rejects non-dictionary .input - passing the bare code string would throw on JSON.parse
+                toolUseBlock = AnthropicWire_Blocks.ToolUseBlock(part.id, 'execute_code' /* suboptimal */, JSON.stringify({ code: part.invocation.code }));
                 break;
               default:
                 const _exhaustiveCheck: never = part.invocation;
@@ -428,8 +471,9 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
               console.warn('Anthropic: broken empty thinking block', { part });
               break;
             }
-            if (part.aText && part.textSignature)
-              yield { role: 'assistant', content: AnthropicWire_Blocks.ThinkingBlock(part.aText, part.textSignature) };
+            // signature-only blocks (empty aText) happen with thinking.display: 'omitted' and must round-trip unchanged
+            if (part.textSignature)
+              yield { role: 'assistant', content: AnthropicWire_Blocks.ThinkingBlock(part.aText || '', part.textSignature) };
             for (const redactedData of part.redactedData || [])
               yield { role: 'assistant', content: AnthropicWire_Blocks.RedactedThinkingBlock(redactedData) };
             break;
@@ -469,15 +513,16 @@ function _toAnthropicTools(itds: AixTools_ToolDefinition[], strictToolsEnabled: 
 
       case 'function_call':
         const { name, description, input_schema, allowed_callers, input_examples } = itd.function_call;
+        const properties = input_schema?.properties || null; // Anthropic valid values for input_schema.properties are 'object' or 'null' (null is used to declare functions with no inputs)
         return {
           type: 'custom', // we could not set it, but it helps our typesystem with discrimination
           name,
           description,
           input_schema: {
             type: 'object',
-            properties: input_schema?.properties || null, // Anthropic valid values for input_schema.properties are 'object' or 'null' (null is used to declare functions with no inputs)
+            properties: strictToolsEnabled && properties ? _strictNormalizeSchema(properties) : properties,
             required: input_schema?.required,
-            // [Anthropic, 2025-11-13] Structured Outputs requires additionalProperties: false
+            // [Anthropic, 2025-11-13] Structured Outputs requires additionalProperties: false (on every nested object too, see _strictNormalizeSchema)
             ...(strictToolsEnabled ? { additionalProperties: false } : {}),
           },
           // [Anthropic, 2025-11-13] Structured Outputs: strict mode guarantees tool inputs match schema
@@ -494,6 +539,22 @@ function _toAnthropicTools(itds: AixTools_ToolDefinition[], strictToolsEnabled: 
 
     }
   });
+}
+
+/**
+ * [Anthropic, 2025-11-13] Strict mode (tools and JSON output) requires `additionalProperties: false` on EVERY
+ * 'object' node in the schema, not just the root - 400 otherwise (verified empirically on Fable 5, 2026-06-09).
+ * Recursively adds it wherever undefined, without overriding explicit values.
+ */
+function _strictNormalizeSchema<T>(node: T): T {
+  if (!node || typeof node !== 'object') return node;
+  if (Array.isArray(node)) return node.map(_strictNormalizeSchema) as T;
+  const obj: Record<string, any> = {};
+  for (const [key, value] of Object.entries(node))
+    obj[key] = _strictNormalizeSchema(value);
+  if (obj.type === 'object' && obj.additionalProperties === undefined)
+    obj.additionalProperties = false;
+  return obj as T;
 }
 
 function _toAnthropicToolChoice(itp: AixTools_ToolsPolicy): NonNullable<TRequest['tool_choice']> {
