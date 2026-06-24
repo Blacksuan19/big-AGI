@@ -11,6 +11,8 @@ import type { SyncConversationMode, SyncResult } from './sync.types';
 
 const STORAGE_BUCKET = 'sync-assets';
 const CONVERSATION_BATCH_SIZE = 20;
+const CONVERSATION_UPSERT_MAX_ROWS = 3;
+const CONVERSATION_UPSERT_MAX_BYTES = 400_000;
 const ASSET_METADATA_BATCH_SIZE = 50;
 let _isApplyingRemoteConversationChanges = false;
 
@@ -69,7 +71,6 @@ async function syncConversations(supabase: SupabaseClient, userId: string, reque
       .filter((conversation) => !conversation._isIncognito && isConversationSyncable(conversation) && isMeaningfulConversation(conversation))
       .map((conversation) => conversation.id)
     : [...new Set(pendingChangedConversationIds)];
-  const syncedChangedIds: string[] = [];
   const candidateRows = candidateConversationIds
     .map((id) => conversationsById.get(id))
     .filter((c): c is NonNullable<typeof c> => !!c && !c._isIncognito && isConversationSyncable(c))
@@ -86,14 +87,12 @@ async function syncConversations(supabase: SupabaseClient, userId: string, reque
   const skippedChangedIds: string[] = [];
   const toUpsert = candidateRows.filter((row) => {
     const remoteUpdatedAt = remoteConversationVersions.get(row.conversation_id);
-    const shouldPush = remoteUpdatedAt === undefined || row.updated_at >= remoteUpdatedAt;
+    const shouldPush = remoteUpdatedAt === undefined || row.updated_at > remoteUpdatedAt;
     if (!shouldPush)
       skippedChangedIds.push(row.conversation_id);
     return shouldPush;
   });
 
-  for (const row of toUpsert)
-    syncedChangedIds.push(row.conversation_id);
   for (const row of toUpsert)
     latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, row.updated_at);
 
@@ -101,8 +100,9 @@ async function syncConversations(supabase: SupabaseClient, userId: string, reque
     clearPendingChangedConversations(pendingChangedConversationIds);
 
   if (toUpsert.length > 0) {
-    await upsertConversationRowsInBatches(supabase, toUpsert, 'Push conversations failed');
-    clearPendingChangedConversations(syncedChangedIds);
+    await upsertConversationRowsInBatches(supabase, toUpsert, 'Push conversations failed', (rows) => {
+      clearPendingChangedConversations(rows.map((row) => row.conversation_id));
+    });
   }
 
   if (skippedChangedIds.length > 0)
@@ -118,9 +118,11 @@ async function syncConversations(supabase: SupabaseClient, userId: string, reque
       data: null,
     }));
     latestSeenConversationUpdate = Math.max(latestSeenConversationUpdate, now);
-    await upsertConversationRowsInBatches(supabase, tombstones, 'Push deletions failed');
-    clearPendingChangedConversations(pendingIds);
-    clearPendingDeletedConversations(pendingIds);
+    await upsertConversationRowsInBatches(supabase, tombstones, 'Push deletions failed', (rows) => {
+      const ids = rows.map((row) => row.conversation_id);
+      clearPendingChangedConversations(ids);
+      clearPendingDeletedConversations(ids);
+    });
   }
 
   const remoteRows = await fetchRemoteConversationRowsSince(supabase, userId, lastConversationSyncTime);
@@ -471,11 +473,42 @@ async function upsertConversationRowsInBatches(
   supabase: SupabaseClient,
   rows: Array<Record<string, any>>,
   errorPrefix: string,
+  onBatchSuccess?: (rows: Array<Record<string, any>>) => void,
 ): Promise<void> {
-  for (const rowBatch of chunkArray(rows, CONVERSATION_BATCH_SIZE)) {
+  for (const rowBatch of chunkRowsByPayload(rows, CONVERSATION_UPSERT_MAX_ROWS, CONVERSATION_UPSERT_MAX_BYTES)) {
     const { error } = await supabase.from('sync_conversations').upsert(rowBatch, { onConflict: 'user_id,conversation_id' });
     if (error) throw new Error(`${errorPrefix}: ${error.message}`);
+    onBatchSuccess?.(rowBatch);
   }
+}
+
+function chunkRowsByPayload<T>(rows: T[], maxRows: number, maxBytes: number): T[][] {
+  const chunks: T[][] = [];
+  let chunk: T[] = [];
+  let chunkBytes = 0;
+
+  for (const row of rows) {
+    const rowBytes = estimateJsonPayloadBytes(row);
+    if (chunk.length > 0 && (chunk.length >= maxRows || chunkBytes + rowBytes > maxBytes)) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 0;
+    }
+    chunk.push(row);
+    chunkBytes += rowBytes;
+  }
+
+  if (chunk.length > 0)
+    chunks.push(chunk);
+
+  return chunks;
+}
+
+function estimateJsonPayloadBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  if (typeof TextEncoder !== 'undefined')
+    return new TextEncoder().encode(json).length;
+  return json.length * 2;
 }
 
 async function fetchRemoteAssetRowsByIds(
