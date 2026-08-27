@@ -57,6 +57,8 @@ type ReassemblyState = AixChatGenerateContent_LL & {
   // reassembly-internal fields
   /** Cursor: index of the open text fragment for appending, or null if none is open */
   _textFragmentIndex: number | null;
+  /** Pending message phase (OpenAI/xAI Responses): set at message-item open, stamped on the NEXT text fragment created */
+  _pendingTextPhase: { vendor: 'openai' | 'xai', phase: 'commentary' | 'final_answer' } | null;
   /** set/overwritten during streaming, consumed by finalizeReassembly() */
   cgMetricsLg: undefined | AixChatGenerateContent_LL_Result['cgMetricsLg'];
   /** Raw termination cause: undetermined yet, client-set, or received from the wire on {cg:'end'} */
@@ -96,6 +98,7 @@ export class ContentReassembler {
     private readonly particleTransforms: ReassemblerParticleTransforms[],
     private readonly skipImageCompression?: boolean,
     private readonly onInlineAudio?: (audio: { blob: Blob; mimeType: string; label: string; durationMs?: number }) => void,
+    private readonly onInlineVideo?: (video: { blob: Blob; mimeType: string; label: string }) => void,
     private readonly wireAbortSignal?: AbortSignal,
   ) {
     this.initialState = {
@@ -104,6 +107,7 @@ export class ContentReassembler {
       generator: initialGenerator,
       // reassembly-internal fields:
       _textFragmentIndex: null,
+      _pendingTextPhase: null,
       cgMetricsLg: undefined,
       terminationReason: undefined,
       dialectStopReason: undefined,
@@ -371,6 +375,9 @@ export class ContentReassembler {
           case 'ii':
             await this.onAppendInlineImage(op);
             break;
+          case 'iv':
+            await this.onAppendInlineVideo(op);
+            break;
           case 'vp':
             this.onSetOperationState(op);
             break;
@@ -469,7 +476,15 @@ export class ContentReassembler {
     }
 
     // new TextContentFragment
-    this._pushFragment(createTextContentFragment(particle.t));
+    const newTextFragment = createTextContentFragment(particle.t);
+
+    // stamp the pending message phase on the new text fragment
+    if (this.S._pendingTextPhase) {
+      newTextFragment.vendorState = { [this.S._pendingTextPhase.vendor]: { phase: this.S._pendingTextPhase.phase } };
+      this.S._pendingTextPhase = null;
+    }
+
+    this._pushFragment(newTextFragment);
     this.S._textFragmentIndex = this.S.fragments.length - 1;
 
   }
@@ -625,6 +640,33 @@ export class ContentReassembler {
     }
   }
 
+  private async onAppendInlineVideo(particle: Extract<AixWire_Particles.PartParticleOp, { p: 'iv' }>): Promise<void> {
+
+    // Break text accumulation, as we have a full video part in the middle
+    this.S._textFragmentIndex = null;
+
+    const { mimeType, v_b64: base64Data, label } = particle;
+    const safeLabel = label || 'Generated Video';
+
+    try {
+
+      // create blob from base64 - this will throw on malformed data
+      const videoBlob = await convert_Base64WithMimeType_To_Blob(base64Data, mimeType, 'ContentReassembler.onAppendInlineVideo');
+
+      // EXPERIMENTAL: generated video is NOT persisted (would be a large blob + object-URLs die on reload).
+      // We save only a breadcrumb; the actual video is handed to the caller for ephemeral in-memory playback.
+      const sizeMB = Math.round(videoBlob.size / 1024 / 102.4) / 10;
+      this._pushFragment(createTextContentFragment(`Generated video ▶ \`${safeLabel}\` (${sizeMB} MB, in-memory only - not saved)`));
+
+      // notify caller for ephemeral playback (object URL created + revoked by the caller)
+      this.onInlineVideo?.({ blob: videoBlob, mimeType, label: safeLabel });
+
+    } catch (error: any) {
+      console.warn('[DEV] Failed to process inline video:', { label: safeLabel, error, mimeType, size: base64Data.length });
+      this._appendErrorFragment(`Failed to process video: ${error?.message || 'Unknown error'}`, 'aix-video-processing');
+    }
+  }
+
   private async onAppendInlineImage(particle: Extract<AixWire_Particles.PartParticleOp, { p: 'ii' }>): Promise<void> {
 
     // Break text accumulation, as we have a full image part in the middle
@@ -709,6 +751,18 @@ export class ContentReassembler {
           fileId: op.fileId,
           containerId: op.containerId,
           ...(op.filename ? { filename: op.filename } : {}),
+        }));
+        break;
+
+      case 'vnd.gem.file':
+        // [Gemini Omni] Files-API artifact (delivery:uri video): persist a re-fetchable hosted_resource. Unlike
+        // 'inline-download', this survives reload for ~48h - the chip re-fetches bytes on demand (key-proxied) to
+        // download or re-play. Nothing is inlined into the conversation; only the `files/{id}` handle is stored.
+        this._pushFragment(createHostedResourceContentFragment({
+          via: 'gemini-file',
+          fileName: op.fileName,
+          mimeType: op.mimeType,
+          ...(op.isVideo ? { isVideo: true } : {}),
         }));
         break;
 
@@ -905,6 +959,15 @@ export class ContentReassembler {
           upstreamContainer: { uct: 'vnd.gem.interactions', envId: id, expiresAt },
         };
       return; // session handle is message-scoped, not fragment-scoped
+    }
+
+    // Message phase (OpenAI/xAI Responses): sent at message-item open, before any text. Break text
+    // accumulation so adjacent items (commentary then final_answer) land in distinct fragments, and
+    // stamp the phase on the next text fragment created (see onAppendText).
+    if ((vendor === 'openai' || vendor === 'xai') && 'messagePhase' in state && state.messagePhase) {
+      this.S._textFragmentIndex = null;
+      this.S._pendingTextPhase = { vendor, phase: state.messagePhase };
+      return;
     }
 
     // Fragment-scoped vendor states - attach to the last fragment (e.g. Gemini thoughtSignature)

@@ -6,8 +6,11 @@ import type { ChatGenerateParseFunction } from '../chatGenerate.dispatch';
 import type { IParticleTransmitter } from './IParticleTransmitter';
 import { IssueSymbols } from '../ChatGenerateTransmitter';
 
+import { convert_Base64_To_UInt8Array, convert_UInt8Array_To_Base64 } from '~/common/util/blobUtils';
+
 import { OpenAIWire_API_Chat_Completions } from '../../wiretypes/openai.wiretypes';
 import { calculateDurationMs, createWAVFromPCM } from './gemini.audioutils';
+import { openAIUpstreamErrorLogLevel } from './openai.error-severity';
 
 
 /**
@@ -92,6 +95,26 @@ export function createOpenAIChatCompletionsChunkParser(): ChatGenerateParseFunct
       return;
     }
 
+    // [OpenCode, 2026-07-11] Trailing cost-accounting event (no id/model/choices) - harvest cost/usage, then skip
+    if (chunkData?.['x-opencode-type'] === 'inference-cost') {
+      const metricsUpdate: AixWire_Particles.CGSelectMetrics = {};
+      const nu = chunkData.normalizedUsage;
+      if (nu && typeof nu === 'object') {
+        if (typeof nu.inputTokens === 'number') metricsUpdate.TIn = nu.inputTokens;
+        if (typeof nu.outputTokens === 'number') metricsUpdate.TOut = nu.outputTokens;
+        if (typeof nu.reasoningTokens === 'number') metricsUpdate.TOutR = nu.reasoningTokens;
+        if (typeof nu.cacheReadTokens === 'number' && nu.cacheReadTokens > 0) metricsUpdate.TCacheRead = nu.cacheReadTokens;
+        const cacheWrite = (nu.cacheWrite5mTokens || 0) + (nu.cacheWrite1hTokens || 0);
+        if (cacheWrite > 0) metricsUpdate.TCacheWrite = cacheWrite;
+      }
+      const cost = typeof chunkData.cost === 'string' ? parseFloat(chunkData.cost) : (typeof chunkData.cost === 'number' ? chunkData.cost : undefined);
+      if (cost !== undefined && !isNaN(cost))
+        metricsUpdate.$cReported = Math.round(cost * 100 * 10000) / 10000;
+      if (Object.keys(metricsUpdate).length)
+        pt.updateMetrics(metricsUpdate);
+      return;
+    }
+
     // [OpenRouter] Extract provider routing info (before Zod parsing strips unknown fields)
     if (!openRouterProviderInfraSent && typeof chunkData?.provider === 'string' && chunkData.provider) {
       openRouterProviderInfraSent = true;
@@ -108,8 +131,8 @@ export function createOpenAIChatCompletionsChunkParser(): ChatGenerateParseFunct
 
     // [OpenAI] an upstream error will be handled gracefully and transmitted as text (throw to transmit as 'error')
     if (json.error) {
-      // FIXME: potential point for throwing OperationRetrySignal (using 'srv-warn' for now)
-      return pt.setDialectTerminatingIssue(safeErrorString(json.error) || 'unknown.', IssueSymbols.Generic, 'srv-warn');
+      // FIXME: potential point for throwing OperationRetrySignal
+      return pt.setDialectTerminatingIssue(safeErrorString(json.error) || 'unknown.', IssueSymbols.Generic, openAIUpstreamErrorLogLevel(json.error));
     }
 
     // [OpenAI] if there's a warning, log it once
@@ -123,11 +146,9 @@ export function createOpenAIChatCompletionsChunkParser(): ChatGenerateParseFunct
       return;
 
 
-    // -> Stats
+    // -> Stats (the usage chunk is the streaming terminal signal; timing survives even without token counts)
     if (json.usage) {
-      const metrics = _fromOpenAIUsage(json.usage, parserCreationTimestamp, timeToFirstEvent);
-      if (metrics)
-        pt.updateMetrics(metrics);
+      pt.updateMetrics(_fromOpenAIMetrics(json.usage, parserCreationTimestamp, timeToFirstEvent));
       // [OpenAI] Expected correct case: the last object has usage, but an empty choices array
       if (!json.choices.length)
         return;
@@ -235,6 +256,16 @@ export function createOpenAIChatCompletionsChunkParser(): ChatGenerateParseFunct
           } else
             console.log('AIX: OpenAI-dispatch: unexpected reasoning detail type:', reasoningDetail);
         }
+
+      }
+      // delta: plain 'reasoning' string [2026-08-16] - hosts that emit delta.reasoning and no reasoning_content: Modular Cloud
+      // z-ai/glm-5.2 + moonshotai/kimi-k2.7-code (minimax-m3 on the same host uses reasoning_content - per-model, not per-host),
+      // Groq + Cerebras gpt-oss-120b, TogetherAI DeepSeek-V4-Flash - all previously declared-but-dropped reasoning.
+      // Last in the chain: OpenRouter/Nous send the same text in both 'reasoning' and 'reasoning_details', handled above.
+      else if (typeof delta.reasoning === 'string' && delta.reasoning) {
+
+        pt.appendReasoningText(delta.reasoning);
+        deltaHasReasoning = true;
 
       }
 
@@ -445,12 +476,8 @@ export function createOpenAIChatCompletionsParserNS(): ChatGenerateParseFunction
     if (json.model)
       pt.setModelName(json.model);
 
-    // -> Stats
-    if (json.usage) {
-      const metrics = _fromOpenAIUsage(json.usage, parserCreationTimestamp, undefined);
-      if (metrics)
-        pt.updateMetrics(metrics);
-    }
+    // -> Metrics: timing always, tokens only when the usage block carries them (#1149)
+    pt.updateMetrics(_fromOpenAIMetrics(json.usage, parserCreationTimestamp, undefined));
 
     // Assumption/validate: expect 1 completion, or stop
     if (json.choices.length !== 1)
@@ -495,25 +522,36 @@ export function createOpenAIChatCompletionsParserNS(): ChatGenerateParseFunction
         throw new Error(`unexpected message content type: ${typeof message.content}`);
 
       // [DeepSeek, 2026-04-24] Non-streaming reasoning_content -> 'ma' reasoning part (mirror of streaming path above)
-      if (typeof message.reasoning_content === 'string' && message.reasoning_content)
+      let messageHasReasoning = false;
+      if (typeof message.reasoning_content === 'string' && message.reasoning_content) {
         pt.appendReasoningText(message.reasoning_content);
+        messageHasReasoning = true;
+      }
 
       // [OpenRouter, 2025-01-20] Handle structured reasoning_details
       if (Array.isArray(message.reasoning_details)) {
         for (const reasoningDetail of message.reasoning_details) {
           if (reasoningDetail.type === 'reasoning.text') {
-            if (typeof reasoningDetail.text === 'string')
+            if (typeof reasoningDetail.text === 'string') {
               pt.appendReasoningText(reasoningDetail.text);
+              messageHasReasoning = true;
+            }
             // else: empty reasoning chunk, e.g. "{ type: 'reasoning.text' }", skip
           } else if (reasoningDetail.type === 'reasoning.summary' && typeof reasoningDetail.summary === 'string') {
             // pt.appendReasoningText(`[Summary] ${reasoningDetail.summary}`);
             pt.appendReasoningText(reasoningDetail.summary);
+            messageHasReasoning = true;
           } else if (reasoningDetail.type === 'reasoning.encrypted') {
             // reasoning happened but not returned, skip
           } else
             console.log('AIX: OpenAI-dispatch-NS: unexpected reasoning detail type:', reasoningDetail);
         }
       }
+
+      // [2026-08-16] plain 'reasoning' string (Modular glm-5.2/kimi-k2.7-code return it with reasoning_content: null; also Groq/Cerebras
+      // gpt-oss-120b, Together DeepSeek-V4-Flash), fallback only - mirror of the streaming path above
+      if (!messageHasReasoning && typeof message.reasoning === 'string' && message.reasoning)
+        pt.appendReasoningText(message.reasoning);
 
       // message: Tool Calls
       for (const toolCall of (message.tool_calls || [])) {
@@ -649,26 +687,28 @@ function _fromOpenAIFinishReason(finish_reason: string | null | undefined) {
   return null;
 }
 
-function _fromOpenAIUsage(usage: OpenAIWire_API_Chat_Completions.Response['usage'], parserCreationTimestamp: number, timeToFirstEvent: number | undefined) {
+function _fromOpenAIMetrics(usage: OpenAIWire_API_Chat_Completions.Response['usage'], parserCreationTimestamp: number, timeToFirstEvent: number | undefined): AixWire_Particles.CGSelectMetrics {
 
-  // -> Stats only in some packages
-  if (!usage)
-    return undefined;
-
-  // Require at least the completion tokens, or issue a DEV warning otherwise
-  if (usage.completion_tokens === undefined) {
-    // Warn, so we may adjust this usage parsing for Non-OpenAI APIs
-    console.log('[DEV] AIX: OpenAI-dispatch missing completion tokens in usage', { usage });
-    return undefined;
-  }
-
-  // Create the metrics update object
+  // Time Metrics - measured locally (parser-creation -> now), independent of the upstream `usage` block.
+  // Emitted UNCONDITIONALLY so the run duration (`dtAll`) survives even when a provider omits usage or its
+  // completion tokens; gating timing behind usage-presence would silently discard it (#1149, cf. #1143).
   const metricsUpdate: AixWire_Particles.CGSelectMetrics = {
-    TIn: usage.prompt_tokens ?? undefined,
-    TOut: usage.completion_tokens,
     // dtInner: openAI is not reporting the time as seen by the servers
     dtAll: Date.now() - parserCreationTimestamp,
   };
+  if (timeToFirstEvent !== undefined)
+    metricsUpdate.dtStart = timeToFirstEvent;
+
+  // Token Metrics - only when the upstream usage block carries completion tokens
+  if (usage?.completion_tokens === undefined) {
+    // Warn (dev) when usage is present but lacks completion tokens, so we may adjust for Non-OpenAI APIs
+    if (usage)
+      console.log('[DEV] AIX: OpenAI-dispatch missing completion tokens in usage', { usage });
+    return metricsUpdate;
+  }
+
+  metricsUpdate.TIn = usage.prompt_tokens ?? undefined;
+  metricsUpdate.TOut = usage.completion_tokens;
 
   // Input Metrics
 
@@ -681,6 +721,14 @@ function _fromOpenAIUsage(usage: OpenAIWire_API_Chat_Completions.Response['usage
       metricsUpdate.TCacheRead = TCacheRead;
       if (metricsUpdate.TIn !== undefined)
         metricsUpdate.TIn -= TCacheRead;
+    }
+
+    // [OpenRouter, 2026-07-10] Input redistribution: Cache Write (paid-write providers via OR: Anthropic, Qwen)
+    const TCacheWrite = usage.prompt_tokens_details.cache_write_tokens ?? undefined;
+    if (TCacheWrite !== undefined && TCacheWrite > 0) {
+      metricsUpdate.TCacheWrite = TCacheWrite;
+      if (metricsUpdate.TIn !== undefined)
+        metricsUpdate.TIn -= TCacheWrite;
     }
   }
 
@@ -721,11 +769,6 @@ function _fromOpenAIUsage(usage: OpenAIWire_API_Chat_Completions.Response['usage
     }
   }
 
-  // Time Metrics
-
-  if (timeToFirstEvent !== undefined)
-    metricsUpdate.dtStart = timeToFirstEvent;
-
   return metricsUpdate;
 }
 
@@ -757,8 +800,8 @@ function _forwardOpenRouterDataError(parsedData: any, pt: IParticleTransmitter) 
   }
 
   // Transmit the error as text - note: throw if you want to transmit as 'error'
-  // FIXME: potential point for throwing OperationRetrySignal (using 'srv-warn' for now)
-  pt.setDialectTerminatingIssue(errorMessage, IssueSymbols.Generic, 'srv-warn');
+  // FIXME: potential point for throwing OperationRetrySignal
+  pt.setDialectTerminatingIssue(errorMessage, IssueSymbols.Generic, openAIUpstreamErrorLogLevel(error));
   return true;
 }
 
@@ -776,14 +819,14 @@ function openaiConvertPCM16ToWAV(base64PCMData: string): {
     bitsPerSample: 16,
   };
 
-  const pcmBuffer = Buffer.from(base64PCMData, 'base64');
+  const pcmBytes = convert_Base64_To_UInt8Array(base64PCMData, 'openai.parser.pcm16');
 
-  const wavBuffer = createWAVFromPCM(pcmBuffer, format);
-  const durationMs = calculateDurationMs(pcmBuffer.length, format);
+  const wavBytes = createWAVFromPCM(pcmBytes, format);
+  const durationMs = calculateDurationMs(pcmBytes.length, format);
 
   return {
     mimeType: 'audio/wav',
-    base64Data: wavBuffer.toString('base64'),
+    base64Data: convert_UInt8Array_To_Base64(wavBytes, 'openai.parser.pcm16'),
     durationMs,
   };
 }

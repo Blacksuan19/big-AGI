@@ -74,6 +74,15 @@ const hotFixAntInjectToolsTextSpacer = true;
  * - Message Deltas will provide a 'stop reason' on the message
  * - Begin/End are explicit
  */
+
+// TODO (tracked, not implemented): Anthropic GA'd "mid-conversation system messages" 2026-05-28 (Opus 4.8 only so far) -
+// a `{role: 'system'}` message can be appended mid-`messages` (must immediately follow a user/tool-result turn, and
+// either end the array or precede an assistant turn) to inject operator-priority instructions without invalidating the
+// cached prefix - unlike editing the top-level `system` field, which busts the cache for everything after it. This is a
+// REQUEST-construction feature (would live in anthropic.messageCreate.ts's per-message content-block generator, not
+// here) - noted in this file as the spot we track Anthropic protocol deltas pending wider model support past Opus 4.8.
+// See: https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages
+
 export function createAnthropicMessageParser(): ChatGenerateParseFunction {
   const parserCreationTimestamp = Date.now();
   let responseMessage: AnthropicWire_API_Message_Create.Response;
@@ -433,20 +442,26 @@ export function createAnthropicMessageParser(): ChatGenerateParseFunction {
           pt.setTokenStopReason(tokenStopReason, _formatAnthropicStopError(delta.stop_details));
 
         // NOTE: we have more fields we're not parsing yet - https://platform.claude.com/docs/en/api/typescript/messages#message_delta_usage
-        if (usage?.output_tokens && messageStartTime) {
+        // Metrics: timing is emitted whenever we have a start reference, independent of upstream usage; token
+        // fields are added only when the usage block carries completion tokens (#1149).
+        if (messageStartTime) {
           const elapsedTimeMilliseconds = Date.now() - messageStartTime;
-          const elapsedTimeSeconds = elapsedTimeMilliseconds / 1000;
-          const chatOutRate = elapsedTimeSeconds > 0 ? usage.output_tokens / elapsedTimeSeconds : 0;
-          pt.updateMetrics({
-            TIn: chatInTokens !== undefined ? chatInTokens : -1,
-            TOut: usage.output_tokens,
-            // reasoning tokens are a subset of output_tokens (already in TOut) - surfaced as a breakdown, like OpenAI/Gemini
-            ...(typeof usage.output_tokens_details?.thinking_tokens === 'number' ? { TOutR: usage.output_tokens_details.thinking_tokens } : {}),
-            vTOutInner: Math.round(chatOutRate * 100) / 100, // Round to 2 decimal places
+          const metricsUpdate: AixWire_Particles.CGSelectMetrics = {
             dtStart: timeToFirstEvent,
             dtInner: elapsedTimeMilliseconds,
             dtAll: Date.now() - parserCreationTimestamp,
-          });
+          };
+          if (usage?.output_tokens) {
+            const elapsedTimeSeconds = elapsedTimeMilliseconds / 1000;
+            const chatOutRate = elapsedTimeSeconds > 0 ? usage.output_tokens / elapsedTimeSeconds : 0;
+            metricsUpdate.TIn = chatInTokens !== undefined ? chatInTokens : -1;
+            metricsUpdate.TOut = usage.output_tokens;
+            // reasoning tokens are a subset of output_tokens (already in TOut) - surfaced as a breakdown, like OpenAI/Gemini
+            if (typeof usage.output_tokens_details?.thinking_tokens === 'number')
+              metricsUpdate.TOutR = usage.output_tokens_details.thinking_tokens;
+            metricsUpdate.vTOutInner = Math.round(chatOutRate * 100) / 100; // Round to 2 decimal places
+          }
+          pt.updateMetrics(metricsUpdate);
         }
 
         if (ANTHROPIC_DEBUG_EVENT_SEQUENCE) console.log(`ant message_delta: stop_reason=${delta.stop_reason || 'none'}, TOut=${usage?.output_tokens || 'none'}`);
@@ -658,19 +673,15 @@ export function createAnthropicMessageParserNS(): ChatGenerateParseFunction {
         needsTextSeparator = hotFixAntInjectToolsTextSpacer;
     }
 
-    // -> Stats
+    // -> Stats: timing always (measured locally); token/cache fields only when the usage block is present (#1149)
+    const metricsUpdate: AixWire_Particles.CGSelectMetrics = {
+      // vTOutInner: // we don't know the server-side rate
+      // dtStart / dtInner: // we don't know
+      dtAll: Date.now() - parserCreationTimestamp,
+    };
     if (usage) {
-      const elapsedTimeMilliseconds = Date.now() - parserCreationTimestamp;
-      // const elapsedTimeSeconds = elapsedTimeMilliseconds / 1000;
-      // const chatOutRate = elapsedTimeSeconds > 0 ? usage.output_tokens / elapsedTimeSeconds : 0;
-      const metricsUpdate: AixWire_Particles.CGSelectMetrics = {
-        TIn: usage.input_tokens,
-        TOut: usage.output_tokens,
-        // vTOutInner: Math.round(chatOutRate * 100) / 100, // Round to 2 decimal places
-        // dtStart: // we don't know
-        // dtInner: // we don't know
-        dtAll: elapsedTimeMilliseconds,
-      };
+      metricsUpdate.TIn = usage.input_tokens;
+      metricsUpdate.TOut = usage.output_tokens;
       if (usage.cache_read_input_tokens || usage.cache_creation_input_tokens) {
         if (typeof usage.cache_read_input_tokens === 'number')
           metricsUpdate.TCacheRead = usage.cache_read_input_tokens;
@@ -680,8 +691,8 @@ export function createAnthropicMessageParserNS(): ChatGenerateParseFunction {
       // reasoning tokens are a subset of output_tokens (already in TOut) - surfaced as a breakdown, like OpenAI/Gemini
       if (typeof usage.output_tokens_details?.thinking_tokens === 'number')
         metricsUpdate.TOutR = usage.output_tokens_details.thinking_tokens;
-      pt.updateMetrics(metricsUpdate);
     }
+    pt.updateMetrics(metricsUpdate);
 
     // Continuation: when pause_turn, throw to trigger re-dispatch with accumulated content
     if (stop_reason === 'pause_turn')
@@ -966,7 +977,7 @@ function _handleCBS_CodeExecutionToolResult(pt: IParticleTransmitter, block: Ext
       if (block.content.type === 'code_execution_result' && block.content.stdout)
         oTexts.push(_ellipsizeContext(block.content.stdout));
       else if (block.content.type === 'encrypted_code_execution_result')
-        oTexts.push('[Anthropic encrypted output]');
+        oTexts.push(`[Anthropic encrypted output, ${block.content.encrypted_stdout.length.toLocaleString()} bytes]`);
       if (block.content.stderr)
         oTexts.push('stderr: ' + _ellipsizeContext(block.content.stderr));
       const codeExecFailed = block.content.return_code !== 0;

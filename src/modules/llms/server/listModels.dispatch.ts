@@ -35,7 +35,9 @@ import { OPENAI_API_PATHS, openAIAccess } from './openai/openai.access';
 import { alibabaModelFilter, alibabaModelSort, alibabaModelToModelDescription } from './openai/models/alibaba.models';
 import { arceeAIHeuristic, arceeAIModelsToModelDescriptions } from './openai/models/arceeai.models';
 import { azureDeploymentFilter, azureDeploymentToModelDescription, azureParseFromDeploymentsAPI } from './openai/models/azure.models';
+import { cerebrasFetchModelDescriptions } from './openai/models/cerebras.models';
 import { chutesAIHeuristic, chutesAIModelsToModelDescriptions } from './openai/models/chutesai.models';
+import { cohereModelFilter, cohereModelSort, cohereModelToModelDescription } from './openai/models/cohere.models';
 import { deepseekModelFilter, deepseekModelSort, deepseekModelToModelDescription } from './openai/models/deepseek.models';
 import { fastAPIHeuristic, fastAPIModels } from './openai/models/fastapi.models';
 import { fireworksAIHeuristic, fireworksAIModelsToModelDescriptions } from './openai/models/fireworksai.models';
@@ -43,10 +45,13 @@ import { groqModelFilter, groqModelSortFn, groqModelToModelDescription, groqVali
 import { llmapiHeuristic, llmapiModelsToModelDescriptions } from './openai/models/llmapi.models';
 import { llmsIsNativeOpenAIHost } from '../shared/llm.isomorphic';
 import { minimaxHardcodedModelDescriptions, minimaxHeuristic } from './openai/models/minimax.models';
+import { nousResearchHeuristic, nousResearchModelsToModelDescriptions } from './openai/models/nousresearch.models';
 import { novitaHeuristic, novitaModelsToModelDescriptions } from './openai/models/novita.models';
+import { nvidiaNIMHeuristic, nvidiaNIMModelsToModelDescriptions } from './openai/models/nvidianim.models';
 import { lmStudioFetchModels, lmStudioModelsToModelDescriptions } from './openai/models/lmstudio.models';
 import { localAIModelSortFn, localAIModelToModelDescription } from './openai/models/localai.models';
 import { mistralModels } from './openai/models/mistral.models';
+import { modularModelsToModelDescriptions } from './openai/models/modular.models';
 import { moonshotModelFilter, moonshotModelSortFn, moonshotModelToModelDescription } from './openai/models/moonshot.models';
 import { openRouterInjectVariants, openRouterModelFamilySortFn, openRouterModelToModelDescription } from './openai/models/openrouter.models';
 import { openAIInjectVariants, openAIModelFilter, openAIModelToModelDescription, openAISortModels, openaiValidateModelDefs_DEV } from './openai/models/openai.models';
@@ -369,13 +374,23 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
         },
       });
 
+    case 'cerebras':
+      // [Cerebras] custom listing: rich public catalog + Cloudflare UA workaround live in cerebras.models.ts
+      return createListModelsDispatch({
+        fetchModels: async () => cerebrasFetchModelDescriptions(access, signal),
+        convertToDescriptions: (descriptions) => descriptions,
+      });
+
     case 'alibaba':
     case 'azure':
+    case 'cohere':
     case 'deepseek':
     case 'groq':
     case 'localai':
     case 'mistral':
+    case 'modular':
     case 'moonshot':
+    case 'nvidianim':
     case 'openai':
     case 'openrouter':
     case 'sakanaai':
@@ -446,6 +461,13 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
                 .map(azureDeploymentToModelDescription)
                 .sort(openAISortModels);
 
+            case 'cohere':
+              // [Cohere] curated caps/pricing/params via manual mappings; drop embed/rerank/transcribe endpoints
+              return maybeModels
+                .filter(({ id }) => cohereModelFilter(id))
+                .map(({ id }) => cohereModelToModelDescription(id))
+                .sort(cohereModelSort);
+
             case 'deepseek':
               return maybeModels
                 .filter(({ id }) => deepseekModelFilter(id))
@@ -469,6 +491,10 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
             case 'mistral':
               return mistralModels(maybeModels);
 
+            case 'modular':
+              // [Modular] API lists ids only; caps/pricing from manual mappings, unknown ids kept (self-hosted MAX serves anything)
+              return modularModelsToModelDescriptions(maybeModels);
+
             case 'moonshot':
               return maybeModels
                 .filter(moonshotModelFilter)
@@ -476,6 +502,11 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
                 .sort(moonshotModelSortFn);
 
             case 'openai':
+
+              // [NVIDIA NIM] custom-host services pointing at NVIDIA's endpoint get the curated parser
+              // (the /v1/models list is a stale superset where ~half the ids are retired and hard-404)
+              if (nvidiaNIMHeuristic(oaiUrl))
+                return nvidiaNIMModelsToModelDescriptions(maybeModels);
 
               // [Arcee AI] special case for model enumeration
               if (arceeAIHeuristic(oaiUrl))
@@ -493,6 +524,10 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
               if (minimaxHeuristic(oaiUrl))
                 return minimaxHardcodedModelDescriptions();
 
+              // [Nous Research] Nous Portal gateway - OpenRouter-style catalog, reuses the OpenRouter mapper
+              if (nousResearchHeuristic(oaiUrl))
+                return nousResearchModelsToModelDescriptions(openAIWireModelsResponse);
+
               // [Novita] special case for model enumeration
               if (novitaHeuristic(oaiUrl))
                 return novitaModelsToModelDescriptions(openAIWireModelsResponse);
@@ -508,8 +543,8 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
               // [OpenAI or OpenAI-compatible]: chat-only models, custom sort, manual mapping
               const isNotOpenai = !llmsIsNativeOpenAIHost(access.oaiHost); // native = empty host (uses default) or explicitly api.openai.com
               const models = maybeModels
-                // limit to only 'gpt' and 'non instruct' models
-                .filter(openAIModelFilter)
+                // limit to only 'gpt' and 'non instruct' models (shutdown denies apply to native OpenAI only)
+                .filter(model => openAIModelFilter(model, !isNotOpenai))
                 // to model description
                 .map((model: any): ModelDescriptionSchema => openAIModelToModelDescription(model.id, { isNotOpenai, modelCreated: model.created }))
                 // inject variants
@@ -518,7 +553,7 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
                 .sort(openAISortModels);
 
               // [DEV] check for stale/unknown model definitions
-              openaiValidateModelDefs_DEV(maybeModels, models);
+              openaiValidateModelDefs_DEV(maybeModels, models, !isNotOpenai);
               return models;
 
             case 'openrouter':
@@ -528,6 +563,11 @@ function _listModelsCreateDispatch(access: AixAPI_Access, signal?: AbortSignal):
                 .map(openRouterModelToModelDescription)
                 .filter(desc => !!desc)
                 .reduce(openRouterInjectVariants, []);
+
+            case 'nvidianim':
+              // [NVIDIA NIM] API lists ids only (constant 'created', no metadata) - curated table with
+              // measured context windows; unknown ids dropped (the list is a stale superset, ~half retired)
+              return nvidiaNIMModelsToModelDescriptions(maybeModels);
 
             case 'sakanaai':
               // [Sakana.ai] Fugu models - API lists ids only; caps/pricing/params from manual mappings
